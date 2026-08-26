@@ -9,11 +9,25 @@ import type { AgentStatus } from './types/state'
 
 /**
  * O jogo Phaser vive fora do React de propósito.
+ *
  * Em StrictMode o efeito roda duas vezes; como `game.destroy()` do Phaser é
  * adiado para o próximo frame, o destroy do primeiro jogo chegava depois da
  * criação do segundo e levava o canvas junto — tela preta.
+ *
+ * E fica no `window`, não no escopo do módulo: o HMR troca o módulo e zeraria
+ * uma variável de módulo, nascendo um segundo jogo por cima do primeiro.
  */
-let jogoGlobal: Phaser.Game | null = null
+declare global {
+  interface Window { __agentOfficeGame?: Phaser.Game }
+}
+
+/** Em desenvolvimento, derruba o jogo antes do módulo ser trocado. */
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    window.__agentOfficeGame?.destroy(true)
+    window.__agentOfficeGame = undefined
+  })
+}
 
 const COR_ESTADO: Record<AgentStatus, string> = {
   idle: 'var(--off)',
@@ -34,6 +48,7 @@ const ROTULO_ESTADO: Record<AgentStatus, string> = {
 export default function App() {
   const palco = useRef<HTMLDivElement>(null)
   const [aviso, setAviso] = useState<string | null>(null)
+  const [carga, setCarga] = useState<{ pronto: boolean; progresso: number }>({ pronto: false, progresso: 0 })
 
   const {
     sessions, selectedId, connected, transcript,
@@ -44,18 +59,39 @@ export default function App() {
   useEffect(() => { connect() }, [connect])
 
   // Phaser sobe uma vez só, e fica de pé enquanto a página viver.
+  //
+  // Só sobe depois que a div tem tamanho de verdade. Se subir enquanto o
+  // layout ainda está em 0x0, o WebGL cria um framebuffer inválido
+  // ("Incomplete Attachment") e o renderer nunca se recupera — tela preta.
   useEffect(() => {
-    if (!palco.current || jogoGlobal) return
-    jogoGlobal = new Phaser.Game({
-      type: Phaser.AUTO,
-      parent: palco.current,
-      backgroundColor: '#120e18',
-      pixelArt: true,
-      audio: { noAudio: true },
-      scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
-      scene: [new OfficeScene()],
-    })
+    if (window.__agentOfficeGame) return
+    let cancelado = false
+
+    const tentar = () => {
+      if (cancelado || window.__agentOfficeGame) return
+      const div = palco.current
+      if (!div || div.offsetWidth < 2 || div.offsetHeight < 2) {
+        requestAnimationFrame(tentar)
+        return
+      }
+      window.__agentOfficeGame = new Phaser.Game({
+        type: Phaser.AUTO,
+        parent: div,
+        backgroundColor: '#120e18',
+        pixelArt: true,
+        audio: { noAudio: true },
+        // setTimeout continua andando em aba de fundo; o rAF é congelado.
+        fps: { forceSetTimeOut: true },
+        scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
+        scene: [new OfficeScene()],
+      })
+    }
+
+    requestAnimationFrame(tentar)
+    return () => { cancelado = true }
   }, [])
+
+  useEffect(() => { bus.aoCarregar((pronto, progresso) => setCarga({ pronto, progresso })) }, [])
 
   // Clique no bonequino abre o transcript daquele especialista.
   useEffect(() => {
@@ -112,6 +148,13 @@ export default function App() {
 
         <div className="palco" ref={palco}>
           {aviso && <div className="toast">{aviso}</div>}
+          {!carga.pronto && connected && (
+            <div className="carregando">
+              <div className="barra"><i style={{ width: `${Math.round(carga.progresso * 100)}%` }} /></div>
+              <span>montando o escritório… {Math.round(carga.progresso * 100)}%</span>
+              {document.hidden && <small>o navegador pausa a animação em aba de fundo</small>}
+            </div>
+          )}
           {!connected && (
             <div className="aviso">
               <div>Sem conexão com o watcher.</div>

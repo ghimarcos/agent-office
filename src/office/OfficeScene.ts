@@ -51,6 +51,7 @@ export class OfficeScene extends Phaser.Scene {
       this.load.image(k.wave1, avatarPath(name, 'wave1'))
       this.load.image(k.wave2, avatarPath(name, 'wave2'))
     }
+    this.load.on('progress', (v: number) => bus.carregando(false, v))
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
       console.error(
         `[agent-office] asset faltando: ${file.url}\n` +
@@ -65,6 +66,7 @@ export class OfficeScene extends Phaser.Scene {
         tex.setFilter(Phaser.Textures.FilterMode.NEAREST)
       }
     })
+    bus.carregando(true, 1)
     this.roomBuilder = new RoomBuilder(this)
     this.render(TIME_PARADO)
     this.desassinar = bus.assinar((agents) => {

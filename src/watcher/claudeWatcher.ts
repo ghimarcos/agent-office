@@ -10,7 +10,6 @@
  */
 import type { Plugin, ViteDevServer } from 'vite'
 import { WebSocketServer, WebSocket } from 'ws'
-import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
@@ -37,14 +36,6 @@ const ROLES: { role: string; name: string; gender: 'male' | 'female' }[] = [
 ]
 
 // ---------------------------------------------------------------- utilidades
-
-function sh(cmd: string, args: string[]): Promise<string> {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-      resolve(err ? '' : stdout)
-    })
-  })
-}
 
 /** Lê só o fim do arquivo e devolve as linhas JSON completas. */
 async function tailJsonl(file: string): Promise<any[]> {
@@ -237,14 +228,36 @@ async function lerServicos(cwd: string): Promise<OfficeService[]> {
   return []
 }
 
+
+/**
+ * Sessões vivas, lidas de ~/.claude/sessions.
+ *
+ * Antes isto rodava `claude agents --json` a cada 1,5s. Cada chamada dispara o
+ * binário do Claude Code (centenas de MB) e o servidor ficava tão ocupado que
+ * as imagens do escritório demoravam a ser servidas — a sala aparecia preta por
+ * dezenas de segundos. Os mesmos dados estão nos arquivos de sessão, de graça.
+ */
+async function lerSessoes(): Promise<any[]> {
+  const dir = path.join(CLAUDE_HOME, 'sessions')
+  let arquivos: string[]
+  try { arquivos = (await fsp.readdir(dir)).filter((f) => f.endsWith('.json')) } catch { return [] }
+
+  const vivas: any[] = []
+  for (const f of arquivos) {
+    let j: any
+    try { j = JSON.parse(await fsp.readFile(path.join(dir, f), 'utf8')) } catch { continue }
+    if (!j?.sessionId || !j?.pid) continue
+    // Processo morto deixa o arquivo para trás; o sinal 0 só testa a existência.
+    try { process.kill(j.pid, 0) } catch { continue }
+    vivas.push(j)
+  }
+  return vivas
+}
+
 // ------------------------------------------------------------------ snapshot
 
 async function buildSnapshot(): Promise<OfficeState[]> {
-  const raw = await sh('claude', ['agents', '--json', '--all'])
-  let sessions: any[] = []
-  try { sessions = JSON.parse(raw || '[]') } catch { sessions = [] }
-
-  const live = sessions.filter((s) => s.kind === 'interactive' || s.state !== 'done')
+  const live = await lerSessoes()
   const states: OfficeState[] = []
 
   for (const s of live) {

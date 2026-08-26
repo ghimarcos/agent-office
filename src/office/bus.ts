@@ -9,12 +9,17 @@ type OuvinteClique = (agent: OfficeAgent) => void
 let ultimo: OfficeAgent[] | null = null
 const ouvintes = new Set<Ouvinte>()
 let aoClicarAgente: OuvinteClique | null = null
+let aoCarregar: ((pronto: boolean, progresso: number) => void) | null = null
 
 export const bus = {
   publicar(agents: OfficeAgent[] | null) {
     ultimo = agents
     for (const o of ouvintes) o(agents)
   },
+  /** A cena informa o andamento do carregamento dos sprites. */
+  carregando(pronto: boolean, progresso: number) { aoCarregar?.(pronto, progresso) },
+  aoCarregar(fn: (pronto: boolean, progresso: number) => void) { aoCarregar = fn },
+
   /** Um bonequino foi clicado na cena. */
   clicar(agent: OfficeAgent) { aoClicarAgente?.(agent) },
   aoClicar(fn: OuvinteClique) { aoClicarAgente = fn },

@@ -100,9 +100,11 @@ export class Gerente {
     }
 
     // A fila volta, mas nada recomeça sozinho: quem decide é você.
+    // E nada é oferecido aqui — no boot não há ninguém olhando, e a oferta
+    // seria gasta no vazio. A pergunta sai quando um turno terminar de verdade.
     this.fila = estado.fila ?? []
     this.ocupado = null
-    if (this.fila.length) await this.oferecerProxima('a retomada do servidor')
+    this.oferecida = null
     await this.gravarEstado()
   }
 
@@ -166,6 +168,10 @@ export class Gerente {
       return
     }
 
+    // Turno novo apaga oferta velha. Sem isso, uma pergunta que você nunca
+    // respondeu virava tranca: `aoTerminar` saía cedo para sempre e o card
+    // nunca mais aparecia.
+    this.oferecida = null
     this.ocupado = chave
     await this.gravarEstado()
     o.enviar(texto)

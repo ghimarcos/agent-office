@@ -56,7 +56,7 @@ body {
 .aba .ponto { display: inline-block; margin-right: 6px; }
 
 .corpo { display: flex; flex: 1; min-height: 0; }
-.palco { flex: 1; min-width: 0; position: relative; }
+.palco { flex: 1; min-width: 0; min-height: 0; position: relative; }
 .palco canvas { display: block; }
 
 .lateral {
@@ -321,3 +321,16 @@ body {
   border: 2px dashed var(--busy); border-radius: 8px; background: rgba(20,32,48,.9);
   font-size: 12px; color: var(--busy); font-weight: 600; pointer-events: none;
 }
+
+/* ------------------------------------------------------- carregando a sala */
+
+.carregando {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  color: var(--muted); font-size: 12px; pointer-events: none;
+}
+.carregando .barra {
+  width: 220px; height: 4px; border-radius: 2px; background: var(--panel-2); overflow: hidden;
+}
+.carregando .barra i { display: block; height: 100%; background: var(--busy); transition: width .2s; }
+.carregando small { font-size: 11px; opacity: .7; }
