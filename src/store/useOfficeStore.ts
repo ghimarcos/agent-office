@@ -46,7 +46,7 @@ interface Store {
   responderPermissao: (blocoId: string, id: string, acao: 'aprovar' | 'aprovar_sempre' | 'recusar') => void
   abrirTranscript: (agentId: string, nome: string, silencioso?: boolean) => void
   fecharTranscript: () => void
-  responderFila: (blocoId: string, comecar: boolean) => void
+  responderFila: (blocoId: string, comecar: boolean, alvo: string) => void
   enviarAnexo: (arquivo: File) => void
   limparAnexo: () => void
 }
@@ -297,7 +297,7 @@ export const useOfficeStore = create<Store>((set, get) => ({
 
   limparAnexo: () => set({ anexoRecebido: null }),
 
-  responderFila: (blocoId, comecar) => {
+  responderFila: (blocoId, comecar, alvo) => {
     set((st) => ({
       blocosPorProjeto: Object.fromEntries(
         Object.entries(st.blocosPorProjeto).map(([k, bs]) => [
@@ -305,6 +305,6 @@ export const useOfficeStore = create<Store>((set, get) => ({
         ]),
       ),
     }))
-    enviarWs({ type: 'FILA_RESPOSTA', comecar })
+    enviarWs({ type: 'FILA_RESPOSTA', comecar, alvo })
   },
 }))

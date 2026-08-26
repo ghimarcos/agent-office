@@ -199,15 +199,43 @@ export class Gerente {
     })
   }
 
-  /** Resposta ao card "começar a próxima?". */
-  async responderFila(comecar: boolean): Promise<void> {
-    const pendente = this.oferecida
+  /**
+   * Resposta ao card "começar a próxima?".
+   *
+   * Trabalha em cima da fila, não de um ponteiro em memória. O card fica
+   * gravado na conversa e sobrevive a um reinício do servidor; se a resposta
+   * dependesse de `this.oferecida`, o clique depois de um restart caía no
+   * vazio, em silêncio.
+   */
+  async responderFila(comecar: boolean, alvo?: string): Promise<void> {
     this.oferecida = null
-    if (!pendente) return
+
+    const pendente = alvo
+      ? this.fila.find((f) => f.chave === alvo)
+      : this.fila[0]
+
+    if (!pendente) {
+      // Nada a começar: pode ter sido iniciada por outro caminho.
+      this.receber({
+        kind: 'erro',
+        chave: alvo ?? this.fila[0]?.chave ?? 'painel',
+        texto: 'Essa demanda não está mais na fila — provavelmente já começou.',
+      })
+      return
+    }
 
     if (!comecar) {
-      // Fica na fila; você retoma quando quiser mandando de novo ou abrindo o projeto.
+      // Fica na fila; você retoma quando quiser.
       await this.gravarEstado()
+      return
+    }
+
+    if (this.ocupado && this.ocupado !== pendente.chave) {
+      this.receber({
+        kind: 'enfileirado', chave: pendente.chave,
+        posicao: this.fila.indexOf(pendente) + 1,
+        ocupadoPor: await this.nomeDe(this.ocupado),
+      })
       return
     }
 

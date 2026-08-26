@@ -55,10 +55,10 @@ function CardFila({ bloco }: { bloco: Bloco }) {
       <div className="resumo">{f.resumo}</div>
       {!decidida && (
         <div className="botoes">
-          <button className="ok" onClick={() => { responder(bloco.id, true); escolherProjeto(f.alvo) }}>
+          <button className="ok" onClick={() => { responder(bloco.id, true, f.alvo); escolherProjeto(f.alvo) }}>
             Começar agora
           </button>
-          <button className="nao" onClick={() => responder(bloco.id, false)}>Depois</button>
+          <button className="nao" onClick={() => responder(bloco.id, false, f.alvo)}>Depois</button>
         </div>
       )}
     </div>

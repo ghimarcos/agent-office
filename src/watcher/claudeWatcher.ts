@@ -519,7 +519,7 @@ export function claudeWatcher(): Plugin {
                 await gerente.abrir(String(msg.chave))
                 break
               case 'FILA_RESPOSTA':
-                await gerente.responderFila(msg.comecar === true)
+                await gerente.responderFila(msg.comecar === true, msg.alvo ? String(msg.alvo) : undefined)
                 broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
                 break
               case 'PERMISSAO':
