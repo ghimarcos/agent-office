@@ -17,8 +17,6 @@ import os from 'node:os'
 import net from 'node:net'
 import readline from 'node:readline'
 import type { OfficeAgent, OfficeState, OfficeTask, OfficeService, AgentStatus, EntradaTranscript } from '../types/state'
-import { type EventoChat } from './orquestrador'
-import { Gerente } from './gerente'
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude')
 const POLL_MS = 1500
@@ -442,128 +440,15 @@ export function claudeWatcher(): Plugin {
         }
       }
 
-      // Um orquestrador por projeto, mas uma demanda por vez: o gerente
-      // enfileira o que chega para outro projeto e só começa com o seu aval.
-      const gerente = new Gerente((evento: EventoChat) => {
-        broadcast(JSON.stringify({ type: 'CHAT', evento }))
-      })
-
-      // Reata as conversas de antes do último desligamento.
-      gerente.retomar().then(
-        () => broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() })),
-        (e) => server.config.logger.warn(`[agent-office] falha ao retomar: ${e}`),
-      )
-
-      /**
-       * Porta de entrada em HTTP, para uma sessão do Claude Code no terminal
-       * mandar demanda sem passar pelo navegador.
-       *
-       * Passa pelo MESMO gerente que o chat, então respeita a fila: mandar
-       * daqui não faz dois times trabalharem ao mesmo tempo.
-       *
-       *   POST /api/demanda  {"chave":"nx","texto":"..."}
-       *   GET  /api/estado
-       */
-      server.middlewares.use('/api', (req, res, next) => {
-        const rota = (req.url ?? '').split('?')[0]
-        res.setHeader('Content-Type', 'application/json; charset=utf-8')
-
-        if (rota === '/estado' && req.method === 'GET') {
-          res.end(JSON.stringify({ ...gerente.resumoFila(), projetos: gerente.abertos() }))
-          return
-        }
-
-        if (rota === '/demanda' && req.method === 'POST') {
-          let corpo = ''
-          req.on('data', (c) => { corpo += c; if (corpo.length > 1e6) req.destroy() })
-          req.on('end', async () => {
-            try {
-              const { chave, texto } = JSON.parse(corpo || '{}')
-              if (!chave || !texto?.trim()) {
-                res.statusCode = 400
-                res.end(JSON.stringify({ erro: 'informe chave e texto' }))
-                return
-              }
-              await gerente.abrir(String(chave))
-              await gerente.enviar(String(chave), String(texto))
-              broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
-              res.end(JSON.stringify({ ok: true, ...gerente.resumoFila() }))
-            } catch (e) {
-              res.statusCode = 500
-              res.end(JSON.stringify({ erro: String(e) }))
-            }
-          })
-          return
-        }
-
-        next()
-      })
-
-      wss.on('connection', async (ws) => {
+      wss.on('connection', (ws) => {
         if (lastJson) ws.send(lastJson)
-        // Reconexão ou página recarregada: devolve a conversa gravada de cada projeto.
-        for (const chave of await gerente.projetosComConversa()) {
-          const eventos = await gerente.historico(chave)
-          if (eventos.length) ws.send(JSON.stringify({ type: 'HISTORICO', chave, eventos }))
-        }
-        ws.send(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
 
         ws.on('message', async (raw) => {
           let msg: any
           try { msg = JSON.parse(String(raw)) } catch { return }
-
-          try {
-            switch (msg.type) {
-              case 'CHAT_ENVIAR':
-                if (typeof msg.texto === 'string' && msg.texto.trim()) {
-                  await gerente.enviar(String(msg.chave), msg.texto)
-                  broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
-                }
-                break
-              case 'CHAT_PROJETO':
-                await gerente.abrir(String(msg.chave))
-                break
-              case 'FILA_RESPOSTA':
-                await gerente.responderFila(msg.comecar === true, msg.alvo ? String(msg.alvo) : undefined)
-                broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
-                break
-              case 'PERMISSAO':
-                if (msg.acao === 'recusar') gerente.recusar(String(msg.chave), String(msg.id))
-                else await gerente.aprovar(String(msg.chave), String(msg.id), msg.acao === 'aprovar_sempre')
-                break
-              case 'TRANSCRIPT': {
-                const entradas = await lerTranscript(String(msg.agentId))
-                ws.send(JSON.stringify({ type: 'TRANSCRIPT', agentId: msg.agentId, entradas }))
-                break
-              }
-              case 'ANEXO': {
-                // Arquivo solto no chat vira arquivo em disco, e o caminho entra
-                // na mensagem — assim qualquer sessão do Claude Code consegue abrir.
-                const dados = Buffer.from(String(msg.dados ?? ''), 'base64')
-                if (dados.length > 20 * 1024 * 1024) {
-                  ws.send(JSON.stringify({ type: 'ANEXO_ERRO', texto: 'Arquivo acima de 20 MB.' }))
-                  break
-                }
-                const dir = path.join(CLAUDE_HOME, 'agent-office', 'anexos')
-                await fsp.mkdir(dir, { recursive: true })
-                const limpo = String(msg.nome ?? 'arquivo').replace(/[^\w.\-]/g, '_').slice(-80)
-                const destino = path.join(dir, `${Date.now()}-${limpo}`)
-                await fsp.writeFile(destino, dados)
-                ws.send(JSON.stringify({ type: 'ANEXO_OK', caminho: destino, nome: limpo }))
-                break
-              }
-              case 'PROJETOS': {
-                let reg: any = {}
-                try { reg = JSON.parse(await fsp.readFile(REGISTRO, 'utf8')) } catch {}
-                const lista = Object.entries<any>(reg)
-                  .filter(([k, v]) => !k.startsWith('_') && v?.servicos)
-                  .map(([k, v]) => ({ chave: k, nome: v.nome ?? k }))
-                ws.send(JSON.stringify({ type: 'PROJETOS', lista }))
-                break
-              }
-            }
-          } catch (e) {
-            ws.send(JSON.stringify({ type: 'CHAT', evento: { kind: 'erro', texto: String(e) } }))
+          if (msg.type === 'TRANSCRIPT') {
+            const entradas = await lerTranscript(String(msg.agentId))
+            ws.send(JSON.stringify({ type: 'TRANSCRIPT', agentId: msg.agentId, entradas }))
           }
         })
       })
@@ -580,11 +465,7 @@ export function claudeWatcher(): Plugin {
 
       tick()
       timer = setInterval(tick, POLL_MS)
-      server.httpServer?.on('close', () => {
-        clearInterval(timer)
-        gerente.parar()
-        wss?.close()
-      })
+      server.httpServer?.on('close', () => { clearInterval(timer); wss?.close() })
     },
   }
 }

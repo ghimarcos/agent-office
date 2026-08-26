@@ -6,9 +6,9 @@ Cada especialista tem uma mesa. Quando o Claude Code delega uma etapa, o bonequi
 correspondente acende a tela e mostra o que está fazendo agora — a ferramenta, o
 arquivo e há quanto tempo.
 
-E você não precisa de terminal: **o chat da esquerda é o Orquestrador**. Você manda
-a demanda ali, ele delega, e você acompanha os bonequinos trabalhando. **Clicar num
-bonequino** abre o que aquele especialista recebeu, está pensando e está fazendo.
+O painel é **somente visualização**: você comanda o time pela sua sessão do Claude
+Code no terminal, e acompanha aqui. **Clicar num bonequino** abre o que aquele
+especialista recebeu, está pensando e está fazendo, ao vivo.
 
 ```
 ┌─ Orquestrador ─┐  ┌─ Arquiteto ─┐
@@ -22,41 +22,6 @@ bonequino** abre o que aquele especialista recebeu, está pensando e está fazen
 ```
 
 ## Como funciona
-
-### O chat
-
-O servidor mantém **um processo Claude Code de longa duração** por projeto, falando
-`stream-json` pelos dois lados: recebe seus turnos por stdin e devolve pensamento,
-texto e chamadas de ferramenta em streaming. O contexto vive no processo, então a
-conversa tem memória de ponta a ponta.
-
-**Permissões.** Em modo headless o CLI não pergunta — ele emite
-`system/permission_denied` e segue, sem executar a ação. O painel captura esse
-evento e mostra um card com a ferramenta e o alvo exato, com três botões:
-*Aprovar uma vez*, *Sempre permitir* e *Recusar*. Ao aprovar, o processo renasce
-com `--resume` (contexto intacto) somando a regra ao `--allowedTools` e refaz a
-ação. *Sempre permitir* também grava a regra no `.claude/settings.local.json` do
-projeto.
-
-> O modo `manual` é obrigatório: é o único em que o CLI emite o evento de negação.
-> Sem ele a recusa chega só como texto e não há como montar o card.
-
-### Mandar demanda de fora do navegador
-
-O painel expõe uma porta de entrada em HTTP para uma sessão do Claude Code no
-terminal enfileirar trabalho sem abrir o navegador:
-
-```bash
-curl -s -X POST http://localhost:4300/api/demanda \
-  -H 'Content-Type: application/json' \
-  -d '{"chave":"meu-projeto","texto":"a demanda"}'
-
-curl -s http://localhost:4300/api/estado   # quem está ocupado e o que espera
-```
-
-Passa pelo **mesmo gerente** que o chat, então respeita a fila: mandar por aqui
-não faz dois times trabalharem ao mesmo tempo, e a demanda aparece na conversa
-e no escritório como qualquer outra.
 
 ### O escritório
 

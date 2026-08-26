@@ -3,7 +3,6 @@ import Phaser from 'phaser'
 import { OfficeScene } from './office/OfficeScene'
 import { bus } from './office/bus'
 import { useOfficeStore } from './store/useOfficeStore'
-import { Chat } from './components/Chat'
 import { PainelTranscript } from './components/PainelTranscript'
 import type { AgentStatus } from './types/state'
 
@@ -144,8 +143,6 @@ export default function App() {
       )}
 
       <div className="corpo">
-        <Chat />
-
         <div className="palco" ref={palco}>
           {aviso && <div className="toast">{aviso}</div>}
           {!carga.pronto && connected && (

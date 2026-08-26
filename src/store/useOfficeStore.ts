@@ -1,54 +1,17 @@
 import { create } from 'zustand'
 import type { OfficeState, EntradaTranscript } from '@/types/state'
 
-export interface Bloco {
-  id: string
-  autor: 'voce' | 'claude' | 'sistema'
-  tipo: 'texto' | 'pensando' | 'ferramenta' | 'erro' | 'permissao' | 'fila'
-  texto: string
-  detalhe?: string
-  permissao?: { id: string; ferramenta: string; alvo: string; regra: string }
-  /** Presente quando tipo === 'fila': a demanda esperando em outro projeto. */
-  fila?: { alvo: string; alvoNome: string; resumo: string }
-  resolvida?: string
-}
-
-interface Projeto { chave: string; nome: string }
-
 interface Store {
   sessions: OfficeState[]
   selectedId: string | null
   connected: boolean
-  projetos: Projeto[]
-
-  /** Conversa, estado e sessão são guardados POR projeto: trocar de projeto no
-   *  painel não pode apagar o que o time estava fazendo no anterior. */
-  chaveAtiva: string | null
-  blocosPorProjeto: Record<string, Bloco[]>
-  pensandoPorProjeto: Record<string, boolean>
-  sessaoPorProjeto: Record<string, string>
-  nomePorProjeto: Record<string, string>
-
-  escolhaManual: boolean
-  /** Projeto cujo time está trabalhando agora — só um por vez. */
-  ocupadoPor: string | null
-  /** Chaves na fila, na ordem. */
-  fila: string[]
-  /** Caminho do último arquivo solto no chat, para colar na mensagem. */
-  anexoRecebido: { caminho: string; nome: string } | null
   transcript: { agentId: string; nome: string; entradas: EntradaTranscript[] } | null
   carregandoTranscript: boolean
 
   select: (id: string) => void
   connect: () => void
-  enviar: (texto: string) => void
-  escolherProjeto: (chave: string) => void
-  responderPermissao: (blocoId: string, id: string, acao: 'aprovar' | 'aprovar_sempre' | 'recusar') => void
   abrirTranscript: (agentId: string, nome: string, silencioso?: boolean) => void
   fecharTranscript: () => void
-  responderFila: (blocoId: string, comecar: boolean, alvo: string) => void
-  enviarAnexo: (arquivo: File) => void
-  limparAnexo: () => void
 }
 
 let ws: WebSocket | null = null
@@ -58,64 +21,19 @@ let ws: WebSocket | null = null
  * uma reconexão — e aí sobravam dois sockets entregando cada mensagem duas vezes.
  */
 let conexaoIniciada = false
-let seq = 0
-const novoId = () => `b${++seq}`
 
 const enviarWs = (msg: unknown) => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
 }
 
-/** Um evento do servidor vira um bloco da conversa. `null` = não se desenha. */
-function eventoParaBloco(e: any): Bloco | null {
-  switch (e.kind) {
-    case 'inicio':
-      return { id: novoId(), autor: 'sistema', tipo: 'texto', texto: `Orquestrador aberto em ${e.projeto}.` }
-    case 'permissao':
-      return { id: novoId(), autor: 'claude', tipo: 'permissao', texto: e.ferramenta, detalhe: e.alvo,
-               permissao: { id: e.id, ferramenta: e.ferramenta, alvo: e.alvo, regra: e.regra } }
-    case 'ferramenta':
-      return { id: novoId(), autor: 'claude', tipo: 'ferramenta', texto: e.nome, detalhe: e.detalhe }
-    case 'pensando':
-      return { id: novoId(), autor: 'claude', tipo: 'pensando', texto: e.texto }
-    case 'erro':
-      return { id: novoId(), autor: 'sistema', tipo: 'erro', texto: e.texto }
-    case 'enfileirado':
-      return { id: novoId(), autor: 'sistema', tipo: 'texto',
-               texto: `O time está trabalhando em ${e.ocupadoPor}. Sua demanda ficou na fila (posição ${e.posicao}).` }
-    case 'fila_pergunta':
-      return { id: novoId(), autor: 'claude', tipo: 'fila', texto: e.alvoNome,
-               fila: { alvo: e.alvo, alvoNome: e.alvoNome, resumo: e.resumo } }
-    case 'texto':
-      return { id: novoId(), autor: 'claude', tipo: 'texto', texto: e.texto }
-    default:
-      return null
-  }
-}
-
-/** Anexa um bloco à conversa do projeto dono do evento. */
-const anexar = (mapa: Record<string, Bloco[]>, chave: string, bloco: Bloco) => ({
-  ...mapa,
-  [chave]: [...(mapa[chave] ?? []), bloco],
-})
-
 export const useOfficeStore = create<Store>((set, get) => ({
   sessions: [],
   selectedId: null,
   connected: false,
-  projetos: [],
-  chaveAtiva: null,
-  blocosPorProjeto: {},
-  pensandoPorProjeto: {},
-  sessaoPorProjeto: {},
-  nomePorProjeto: {},
-  escolhaManual: false,
-  ocupadoPor: null,
-  fila: [],
-  anexoRecebido: null,
   transcript: null,
   carregandoTranscript: false,
 
-  select: (id) => set({ selectedId: id, escolhaManual: true }),
+  select: (id) => set({ selectedId: id }),
 
   connect: () => {
     if (conexaoIniciada) return
@@ -124,72 +42,18 @@ export const useOfficeStore = create<Store>((set, get) => ({
 
     const open = () => {
       ws = new WebSocket(url)
-
-      ws.onopen = () => {
-        set({ connected: true })
-        enviarWs({ type: 'PROJETOS' })
-      }
+      ws.onopen = () => set({ connected: true })
 
       ws.onmessage = (ev) => {
         let msg: any
         try { msg = JSON.parse(ev.data) } catch { return }
 
         if (msg.type === 'SNAPSHOT') {
-          const { selectedId, chaveAtiva, sessaoPorProjeto, escolhaManual } = get()
-          const doChat = chaveAtiva ? sessaoPorProjeto[chaveAtiva] : null
-          // A sessão do chat manda — a não ser que você tenha escolhido uma aba
-          // na mão, senão a escolha era desfeita a cada atualização.
-          const seguir = !escolhaManual && doChat
-            && msg.sessions.some((s: OfficeState) => s.sessionId === doChat) ? doChat : null
+          const { selectedId } = get()
           const ainda = msg.sessions.some((s: OfficeState) => s.sessionId === selectedId)
+          // Sem escolha sua, o painel segue quem está trabalhando agora.
           const proxima = msg.sessions.find((s: OfficeState) => s.status === 'running') ?? msg.sessions[0]
-          set({
-            sessions: msg.sessions,
-            selectedId: seguir ?? (ainda ? selectedId : (proxima?.sessionId ?? null)),
-          })
-          return
-        }
-
-        if (msg.type === 'PROJETOS') { set({ projetos: msg.lista ?? [] }); return }
-
-        if (msg.type === 'HISTORICO') {
-          // Conversa gravada em disco: reconstrói a aba daquele projeto.
-          const eventos: any[] = msg.eventos ?? []
-          const blocos = eventos.map(eventoParaBloco).filter(Boolean) as Bloco[]
-          const ultimoInicio = [...eventos].reverse().find((e) => e.kind === 'inicio')
-          set((st) => ({
-            blocosPorProjeto: { ...st.blocosPorProjeto, [msg.chave]: blocos },
-            // Página recarregada: reabre sozinho a conversa que voltou do disco.
-            chaveAtiva: st.chaveAtiva ?? msg.chave,
-            nomePorProjeto: ultimoInicio
-              ? { ...st.nomePorProjeto, [msg.chave]: ultimoInicio.projeto }
-              : st.nomePorProjeto,
-            sessaoPorProjeto: ultimoInicio?.sessionId
-              ? { ...st.sessaoPorProjeto, [msg.chave]: ultimoInicio.sessionId }
-              : st.sessaoPorProjeto,
-          }))
-          return
-        }
-
-        if (msg.type === 'ANEXO_OK') {
-          set({ anexoRecebido: { caminho: msg.caminho, nome: msg.nome } })
-          return
-        }
-
-        if (msg.type === 'ANEXO_ERRO') {
-          const chave = get().chaveAtiva
-          if (chave) {
-            set((st) => ({
-              blocosPorProjeto: anexar(st.blocosPorProjeto, chave, {
-                id: novoId(), autor: 'sistema', tipo: 'erro', texto: msg.texto,
-              }),
-            }))
-          }
-          return
-        }
-
-        if (msg.type === 'FILA') {
-          set({ ocupadoPor: msg.ocupado ?? null, fila: (msg.fila ?? []).map((f: any) => f.chave) })
+          set({ sessions: msg.sessions, selectedId: ainda ? selectedId : (proxima?.sessionId ?? null) })
           return
         }
 
@@ -197,40 +61,7 @@ export const useOfficeStore = create<Store>((set, get) => ({
           const atual = get().transcript
           if (!atual || atual.agentId !== msg.agentId) return
           set({ transcript: { ...atual, entradas: msg.entradas ?? [] }, carregandoTranscript: false })
-          return
         }
-
-        if (msg.type !== 'CHAT') return
-        const e = msg.evento
-        const chave: string = e.chave
-        if (!chave) return
-
-        if (e.kind === 'inicio') {
-          set((st) => ({
-            nomePorProjeto: { ...st.nomePorProjeto, [chave]: e.projeto },
-            sessaoPorProjeto: e.sessionId
-              ? { ...st.sessaoPorProjeto, [chave]: e.sessionId }
-              : st.sessaoPorProjeto,
-            escolhaManual: false,
-            pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: false },
-            // Retomada não repete o aviso de abertura.
-            blocosPorProjeto: e.retomado && st.blocosPorProjeto[chave]?.length
-              ? st.blocosPorProjeto
-              : anexar(st.blocosPorProjeto, chave, {
-                  id: novoId(), autor: 'sistema', tipo: 'texto',
-                  texto: `Orquestrador aberto em ${e.projeto}.`,
-                }),
-          }))
-          return
-        }
-
-        if (e.kind === 'fim') {
-          set((st) => ({ pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: false } }))
-          return
-        }
-
-        const bloco = eventoParaBloco(e)
-        if (bloco) set((st) => ({ blocosPorProjeto: anexar(st.blocosPorProjeto, chave, bloco) }))
       }
 
       ws.onclose = () => { set({ connected: false }); setTimeout(open, 2000) }
@@ -239,40 +70,6 @@ export const useOfficeStore = create<Store>((set, get) => ({
 
     open()
     // Sem cleanup de propósito: o socket acompanha a página, não o componente.
-  },
-
-  enviar: (texto) => {
-    const chave = get().chaveAtiva
-    if (!chave) return
-    set((st) => ({
-      pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: true },
-      blocosPorProjeto: anexar(st.blocosPorProjeto, chave, {
-        id: novoId(), autor: 'voce', tipo: 'texto', texto,
-      }),
-    }))
-    enviarWs({ type: 'CHAT_ENVIAR', chave, texto })
-  },
-
-  /** Só troca a conversa visível. O projeto anterior segue trabalhando. */
-  escolherProjeto: (chave) => {
-    set({ chaveAtiva: chave, escolhaManual: false })
-    enviarWs({ type: 'CHAT_PROJETO', chave })
-  },
-
-  responderPermissao: (blocoId, id, acao) => {
-    const chave = get().chaveAtiva
-    if (!chave) return
-    set((st) => ({
-      pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: acao !== 'recusar' },
-      blocosPorProjeto: {
-        ...st.blocosPorProjeto,
-        [chave]: (st.blocosPorProjeto[chave] ?? []).map((b) =>
-          b.id === blocoId
-            ? { ...b, resolvida: acao === 'recusar' ? 'recusada' : acao === 'aprovar_sempre' ? 'sempre' : 'aprovada' }
-            : b),
-      },
-    }))
-    enviarWs({ type: 'PERMISSAO', chave, id, acao })
   },
 
   abrirTranscript: (agentId, nome, silencioso = false) => {
@@ -285,26 +82,4 @@ export const useOfficeStore = create<Store>((set, get) => ({
   },
 
   fecharTranscript: () => set({ transcript: null }),
-
-  enviarAnexo: (arquivo) => {
-    const leitor = new FileReader()
-    leitor.onload = () => {
-      const dados = String(leitor.result).split(',')[1] ?? ''
-      enviarWs({ type: 'ANEXO', nome: arquivo.name, dados })
-    }
-    leitor.readAsDataURL(arquivo)
-  },
-
-  limparAnexo: () => set({ anexoRecebido: null }),
-
-  responderFila: (blocoId, comecar, alvo) => {
-    set((st) => ({
-      blocosPorProjeto: Object.fromEntries(
-        Object.entries(st.blocosPorProjeto).map(([k, bs]) => [
-          k, bs.map((b) => (b.id === blocoId ? { ...b, resolvida: comecar ? 'comecou' : 'adiada' } : b)),
-        ]),
-      ),
-    }))
-    enviarWs({ type: 'FILA_RESPOSTA', comecar, alvo })
-  },
 }))
