@@ -224,6 +224,13 @@ export class Gerente {
     this.pegar(chave).recusar(id)
   }
 
+  /** Projetos já abertos, com o nome de exibição. */
+  abertos(): { chave: string; nome: string }[] {
+    return [...this.orqs.entries()]
+      .filter(([, o]) => o.projetoAtual)
+      .map(([chave, o]) => ({ chave, nome: o.projetoAtual }))
+  }
+
   /** Estado da fila, para o navegador desenhar os indicadores. */
   resumoFila(): { ocupado: string | null; fila: { chave: string }[] } {
     return { ocupado: this.ocupado, fila: this.fila.map((f) => ({ chave: f.chave })) }

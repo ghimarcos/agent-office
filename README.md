@@ -41,6 +41,23 @@ projeto.
 > O modo `manual` é obrigatório: é o único em que o CLI emite o evento de negação.
 > Sem ele a recusa chega só como texto e não há como montar o card.
 
+### Mandar demanda de fora do navegador
+
+O painel expõe uma porta de entrada em HTTP para uma sessão do Claude Code no
+terminal enfileirar trabalho sem abrir o navegador:
+
+```bash
+curl -s -X POST http://localhost:4300/api/demanda \
+  -H 'Content-Type: application/json' \
+  -d '{"chave":"meu-projeto","texto":"a demanda"}'
+
+curl -s http://localhost:4300/api/estado   # quem está ocupado e o que espera
+```
+
+Passa pelo **mesmo gerente** que o chat, então respeita a fila: mandar por aqui
+não faz dois times trabalharem ao mesmo tempo, e a demanda aparece na conversa
+e no escritório como qualquer outra.
+
 ### O escritório
 
 Não há integração, webhook nem daemon. O painel lê o que o Claude Code já grava

@@ -159,6 +159,8 @@ export const useOfficeStore = create<Store>((set, get) => ({
           const ultimoInicio = [...eventos].reverse().find((e) => e.kind === 'inicio')
           set((st) => ({
             blocosPorProjeto: { ...st.blocosPorProjeto, [msg.chave]: blocos },
+            // Página recarregada: reabre sozinho a conversa que voltou do disco.
+            chaveAtiva: st.chaveAtiva ?? msg.chave,
             nomePorProjeto: ultimoInicio
               ? { ...st.nomePorProjeto, [msg.chave]: ultimoInicio.projeto }
               : st.nomePorProjeto,

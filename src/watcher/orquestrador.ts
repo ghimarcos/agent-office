@@ -167,6 +167,10 @@ export class Orquestrador {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env },
+      // Grupo próprio: o `claude` do PATH é um invólucro que roda o binário de
+      // verdade como filho. Matar só o invólucro deixava o filho vivo, e cada
+      // aprovação (que reinicia o processo) abandonava uma sessão rodando.
+      detached: true,
     })
     this.primeiroTurno = false
     this.buf = ''
@@ -272,8 +276,17 @@ export class Orquestrador {
   }
 
   parar(): void {
-    this.proc?.stdin?.end()
-    this.proc?.kill()
+    const p = this.proc
     this.proc = null
+    const pid = p?.pid
+    if (!p || pid === undefined) return
+    try { p.stdin?.end() } catch { /* já fechado */ }
+    // Sinal para o grupo inteiro (pid negativo), não só para o invólucro.
+    try { process.kill(-pid, 'SIGTERM') } catch { try { p.kill('SIGTERM') } catch {} }
+    // Quem não sair no susto sai no tranco.
+    const forcar = setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL') } catch { try { p.kill('SIGKILL') } catch {} }
+    }, 2000)
+    forcar.unref?.()
   }
 }

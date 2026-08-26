@@ -436,6 +436,51 @@ export function claudeWatcher(): Plugin {
         (e) => server.config.logger.warn(`[agent-office] falha ao retomar: ${e}`),
       )
 
+      /**
+       * Porta de entrada em HTTP, para uma sessão do Claude Code no terminal
+       * mandar demanda sem passar pelo navegador.
+       *
+       * Passa pelo MESMO gerente que o chat, então respeita a fila: mandar
+       * daqui não faz dois times trabalharem ao mesmo tempo.
+       *
+       *   POST /api/demanda  {"chave":"nx","texto":"..."}
+       *   GET  /api/estado
+       */
+      server.middlewares.use('/api', (req, res, next) => {
+        const rota = (req.url ?? '').split('?')[0]
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+
+        if (rota === '/estado' && req.method === 'GET') {
+          res.end(JSON.stringify({ ...gerente.resumoFila(), projetos: gerente.abertos() }))
+          return
+        }
+
+        if (rota === '/demanda' && req.method === 'POST') {
+          let corpo = ''
+          req.on('data', (c) => { corpo += c; if (corpo.length > 1e6) req.destroy() })
+          req.on('end', async () => {
+            try {
+              const { chave, texto } = JSON.parse(corpo || '{}')
+              if (!chave || !texto?.trim()) {
+                res.statusCode = 400
+                res.end(JSON.stringify({ erro: 'informe chave e texto' }))
+                return
+              }
+              await gerente.abrir(String(chave))
+              await gerente.enviar(String(chave), String(texto))
+              broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
+              res.end(JSON.stringify({ ok: true, ...gerente.resumoFila() }))
+            } catch (e) {
+              res.statusCode = 500
+              res.end(JSON.stringify({ erro: String(e) }))
+            }
+          })
+          return
+        }
+
+        next()
+      })
+
       wss.on('connection', async (ws) => {
         if (lastJson) ws.send(lastJson)
         // Reconexão ou página recarregada: devolve a conversa gravada de cada projeto.
