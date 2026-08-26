@@ -75,7 +75,7 @@ function describeTool(name: string, input: any): { tool: string; detail: string 
     return { tool: name, detail: base(input?.file_path) }
   }
   if (name === 'Bash') {
-    const d = input?.description || String(input?.command || '').slice(0, 48)
+    const d = input?.description || String(input?.command || '').slice(0, 32)
     return { tool: 'Bash', detail: d }
   }
   if (name === 'Grep' || name === 'Glob') {

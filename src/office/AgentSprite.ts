@@ -29,7 +29,7 @@ function detailLine(agent: OfficeAgent): string {
   if (agent.status === 'idle') return ''
   const parts: string[] = []
   if (agent.tool) parts.push(agent.tool)
-  if (agent.detail) parts.push(agent.detail.length > 26 ? agent.detail.slice(0, 25) + '…' : agent.detail)
+  if (agent.detail) parts.push(agent.detail.length > 16 ? agent.detail.slice(0, 15) + '…' : agent.detail)
   if (agent.since) {
     const secs = Math.max(0, Math.round((Date.now() - new Date(agent.since).getTime()) / 1000))
     parts.push(secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, '0')}s`)

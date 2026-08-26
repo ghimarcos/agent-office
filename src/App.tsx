@@ -13,6 +13,14 @@ const COR_ESTADO: Record<AgentStatus, string> = {
   delivering: 'var(--busy)',
 }
 
+/**
+ * O jogo Phaser vive fora do React de propósito.
+ * Em StrictMode o efeito roda duas vezes; como `game.destroy()` do Phaser é
+ * adiado para o próximo frame, o destroy do primeiro jogo chegava depois da
+ * criação do segundo e levava o canvas junto — tela preta.
+ */
+let jogoGlobal: Phaser.Game | null = null
+
 const ROTULO_ESTADO: Record<AgentStatus, string> = {
   idle: 'aguardando',
   working: 'trabalhando',
@@ -23,17 +31,16 @@ const ROTULO_ESTADO: Record<AgentStatus, string> = {
 
 export default function App() {
   const palco = useRef<HTMLDivElement>(null)
-  const jogo = useRef<Phaser.Game | null>(null)
 
   const { sessions, selectedId, connected, select, connect } = useOfficeStore()
   const atual = sessions.find((s) => s.sessionId === selectedId) ?? null
 
   useEffect(() => connect(), [connect])
 
-  // Phaser sobe uma vez só.
+  // Phaser sobe uma vez só, e fica de pé enquanto a página viver.
   useEffect(() => {
-    if (!palco.current || jogo.current) return
-    jogo.current = new Phaser.Game({
+    if (!palco.current || jogoGlobal) return
+    jogoGlobal = new Phaser.Game({
       type: Phaser.AUTO,
       parent: palco.current,
       backgroundColor: '#120e18',
@@ -42,7 +49,6 @@ export default function App() {
       scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH },
       scene: [new OfficeScene()],
     })
-    return () => { jogo.current?.destroy(true); jogo.current = null }
   }, [])
 
   // Cada snapshot vai pro bus; a cena consome quando estiver de pé.

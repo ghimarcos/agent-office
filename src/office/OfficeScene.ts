@@ -101,7 +101,7 @@ export class OfficeScene extends Phaser.Scene {
       maxRow = Math.max(maxRow, a.desk.row)
     }
 
-    const cellW = CELL_W + 64
+    const cellW = CELL_W + 96
     const cellH = CELL_H + 90
     const roomW = Math.max(maxCol * cellW + MARGIN * 2, 580)
     const roomH = maxRow * cellH + MARGIN * 2 + WALL_H + CELL_H + 48
