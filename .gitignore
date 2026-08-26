@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Arte de terceiro — NAO versionar.
+# Os sprites vêm do pacote Modern Interiors da LimeZu (https://limezu.itch.io/moderninteriors),
+# cuja licença permite usar mas proíbe redistribuir os arquivos.
+# Rode `npm run setup:assets` para instalá-los localmente.
+public/assets/
