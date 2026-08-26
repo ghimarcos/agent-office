@@ -276,14 +276,19 @@ async function buildSnapshot(): Promise<OfficeState[]> {
     }
 
     const subs = projDir ? await readSubagents(projDir, s.sessionId) : new Map<string, OfficeAgent>()
-    const busy = s.status === 'busy' || s.state === 'running'
+
+    // Sessão headless (as do painel) NÃO escreve `status` no arquivo de sessão —
+    // só as interativas escrevem. Confiar nesse campo deixava o Orquestrador
+    // eternamente "aguardando" enquanto ele trabalhava. O sinal honesto é o
+    // transcript ter sido tocado agora há pouco.
+    const busy = mainFresh || s.status === 'busy' || s.state === 'running'
 
     const agents: OfficeAgent[] = ROLES.map((r, i) => {
       const desk = { col: (i % 2) + 1, row: Math.floor(i / 2) + 1 }
       if (r.role === 'orquestrador') {
         return {
           id: r.role, role: r.role, name: r.name, gender: r.gender, desk,
-          status: (busy && mainFresh ? 'working' : busy ? 'checkpoint' : 'idle') as AgentStatus,
+          status: (mainFresh ? 'working' : busy ? 'checkpoint' : 'idle') as AgentStatus,
           tool: mainTool?.tool, detail: mainTool?.detail, since: mainTool?.at,
         }
       }

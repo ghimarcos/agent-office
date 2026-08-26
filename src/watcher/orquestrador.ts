@@ -95,6 +95,8 @@ export class Orquestrador {
   get ocupado(): boolean { return this.turnoAberto }
 
   private turnoAberto = false
+  /** Todo pid que este orquestrador já subiu, para não deixar nenhum órfão. */
+  private pidsVivos = new Set<number>()
 
   /**
    * Reata uma conversa de antes do servidor reiniciar. O processo sobe com
@@ -149,9 +151,11 @@ export class Orquestrador {
       '-p', '--verbose',
       '--output-format', 'stream-json',
       '--input-format', 'stream-json',
-      // `manual` é o único modo em que o CLI emite `system/permission_denied`.
-      // Sem ele a negação chega só como texto e não há como montar o card.
-      '--permission-mode', 'manual',
+      // `auto` usa o mesmo classificador da sessão interativa: libera sozinho o
+      // que é seguro e só barra o que merece decisão humana — o card continua
+      // existindo para esses casos. `manual` barrava tudo que não estivesse na
+      // allowlist e inundava o chat de pedidos.
+      '--permission-mode', 'auto',
     ]
     // Primeira subida cria a sessão; as seguintes retomam preservando o contexto.
     if (this.primeiroTurno) args.push('--session-id', this.sessionId)
@@ -174,13 +178,17 @@ export class Orquestrador {
     })
     this.primeiroTurno = false
     this.buf = ''
+    if (this.proc.pid) this.pidsVivos.add(this.proc.pid)
 
     this.proc.stdout?.on('data', (d) => this.consumir(String(d)))
     this.proc.stderr?.on('data', (d) => {
       const t = String(d).trim()
       if (t) this.emitir({ kind: 'erro', texto: t.slice(0, 400) })
     })
-    this.proc.on('close', () => { this.proc = null })
+    this.proc.on('close', () => {
+      if (this.proc?.pid) this.pidsVivos.delete(this.proc.pid)
+      this.proc = null
+    })
   }
 
   private consumir(chunk: string): void {
@@ -278,15 +286,19 @@ export class Orquestrador {
   parar(): void {
     const p = this.proc
     this.proc = null
-    const pid = p?.pid
-    if (!p || pid === undefined) return
-    try { p.stdin?.end() } catch { /* já fechado */ }
-    // Sinal para o grupo inteiro (pid negativo), não só para o invólucro.
-    try { process.kill(-pid, 'SIGTERM') } catch { try { p.kill('SIGTERM') } catch {} }
-    // Quem não sair no susto sai no tranco.
-    const forcar = setTimeout(() => {
-      try { process.kill(-pid, 'SIGKILL') } catch { try { p.kill('SIGKILL') } catch {} }
-    }, 2000)
-    forcar.unref?.()
+    try { p?.stdin?.end() } catch { /* já fechado */ }
+
+    // Varre TODOS os pids já subidos, não só o atual. Cada aprovação reinicia o
+    // processo, e bastava um `close` chegar fora de ordem para o anterior ficar
+    // para trás — foi assim que nove sessões ficaram vivas ao mesmo tempo.
+    for (const pid of this.pidsVivos) {
+      // Sinal para o grupo inteiro (pid negativo): o filho é líder do grupo.
+      try { process.kill(-pid, 'SIGTERM') } catch { try { process.kill(pid, 'SIGTERM') } catch {} }
+      const forcar = setTimeout(() => {
+        try { process.kill(-pid, 'SIGKILL') } catch { try { process.kill(pid, 'SIGKILL') } catch {} }
+      }, 2000)
+      forcar.unref?.()
+    }
+    this.pidsVivos.clear()
   }
 }
