@@ -19,6 +19,8 @@ export interface OfficeAgent {
   since?: string
   /** O que foi delegado a este especialista. */
   description?: string
+  /** Id do arquivo de transcript do subagent — usado ao clicar no bonequino. */
+  agentId?: string
 }
 
 export interface OfficeTask {
@@ -48,3 +50,11 @@ export interface OfficeState {
 }
 
 export type WsMessage = { type: 'SNAPSHOT'; sessions: OfficeState[] }
+
+/** Uma entrada do transcript de um especialista, para o painel de inspeção. */
+export interface EntradaTranscript {
+  tipo: 'prompt' | 'pensando' | 'texto' | 'ferramenta' | 'resultado'
+  texto: string
+  detalhe?: string
+  at?: string
+}

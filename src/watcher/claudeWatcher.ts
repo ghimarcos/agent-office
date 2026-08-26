@@ -16,7 +16,8 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
-import type { OfficeAgent, OfficeState, OfficeTask, OfficeService, AgentStatus } from '../types/state'
+import type { OfficeAgent, OfficeState, OfficeTask, OfficeService, AgentStatus, EntradaTranscript } from '../types/state'
+import { Orquestrador, type EventoChat } from './orquestrador'
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude')
 const POLL_MS = 1500
@@ -189,6 +190,7 @@ async function readSubagents(projDir: string, sessionId: string): Promise<Map<st
       detail: last?.detail,
       since: last?.at ?? new Date(mtime).toISOString(),
       description: meta.description,
+      agentId: metaFile.replace('agent-', '').replace('.meta.json', ''),
     })
   }
   return out
@@ -304,6 +306,60 @@ async function buildSnapshot(): Promise<OfficeState[]> {
   return states
 }
 
+
+// ---------------------------------------------------------------- transcript
+
+/** Transcript completo de um especialista, para o painel que abre no clique. */
+async function lerTranscript(agentId: string): Promise<EntradaTranscript[]> {
+  const root = path.join(CLAUDE_HOME, 'projects')
+  let alvo: string | null = null
+  let dirs: string[]
+  try { dirs = await fsp.readdir(root) } catch { return [] }
+
+  busca: for (const d of dirs) {
+    const projDir = path.join(root, d)
+    let sessoes: string[]
+    try { sessoes = await fsp.readdir(projDir) } catch { continue }
+    for (const sid of sessoes) {
+      const f = path.join(projDir, sid, 'subagents', `agent-${agentId}.jsonl`)
+      if (fs.existsSync(f)) { alvo = f; break busca }
+    }
+  }
+  if (!alvo) return []
+
+  const linhas = await tailJsonl(alvo)
+  const saida: EntradaTranscript[] = []
+
+  // A primeira linha do arquivo é o prompt que o orquestrador delegou.
+  try {
+    const primeira = (await fsp.readFile(alvo, 'utf8')).split('\n')[0]
+    const j = JSON.parse(primeira)
+    const c = j?.message?.content
+    const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: any) => x.text ?? '').join('') : ''
+    if (txt) saida.push({ tipo: 'prompt', texto: txt, at: j.timestamp })
+  } catch { /* arquivo em escrita */ }
+
+  for (const j of linhas) {
+    if (j.type !== 'assistant') continue
+    for (const c of j.message?.content ?? []) {
+      if (c.type === 'thinking' && c.thinking) {
+        saida.push({ tipo: 'pensando', texto: c.thinking, at: j.timestamp })
+      } else if (c.type === 'text' && c.text?.trim()) {
+        saida.push({ tipo: 'texto', texto: c.text, at: j.timestamp })
+      } else if (c.type === 'tool_use') {
+        const { tool, detail } = describeTool(c.name, c.input)
+        saida.push({
+          tipo: 'ferramenta',
+          texto: tool,
+          detalhe: detail || JSON.stringify(c.input ?? {}).slice(0, 300),
+          at: j.timestamp,
+        })
+      }
+    }
+  }
+  return saida.slice(-400)
+}
+
 // -------------------------------------------------------------- plugin Vite
 
 export function claudeWatcher(): Plugin {
@@ -327,8 +383,51 @@ export function claudeWatcher(): Plugin {
         }
       }
 
+      const orq = new Orquestrador((evento: EventoChat) => {
+        broadcast(JSON.stringify({ type: 'CHAT', evento }))
+      })
+
       wss.on('connection', (ws) => {
         if (lastJson) ws.send(lastJson)
+        if (orq.projetoAtual) {
+          ws.send(JSON.stringify({ type: 'CHAT', evento: { kind: 'inicio', projeto: orq.projetoAtual, cwd: '', sessionId: orq.sessao } }))
+        }
+
+        ws.on('message', async (raw) => {
+          let msg: any
+          try { msg = JSON.parse(String(raw)) } catch { return }
+
+          try {
+            switch (msg.type) {
+              case 'CHAT_ENVIAR':
+                if (typeof msg.texto === 'string' && msg.texto.trim()) orq.enviar(msg.texto)
+                break
+              case 'CHAT_PROJETO':
+                await orq.abrirProjeto(String(msg.chave))
+                break
+              case 'PERMISSAO':
+                if (msg.acao === 'recusar') orq.recusar(String(msg.id))
+                else await orq.aprovar(String(msg.id), msg.acao === 'aprovar_sempre')
+                break
+              case 'TRANSCRIPT': {
+                const entradas = await lerTranscript(String(msg.agentId))
+                ws.send(JSON.stringify({ type: 'TRANSCRIPT', agentId: msg.agentId, entradas }))
+                break
+              }
+              case 'PROJETOS': {
+                let reg: any = {}
+                try { reg = JSON.parse(await fsp.readFile(REGISTRO, 'utf8')) } catch {}
+                const lista = Object.entries<any>(reg)
+                  .filter(([k, v]) => !k.startsWith('_') && v?.servicos)
+                  .map(([k, v]) => ({ chave: k, nome: v.nome ?? k }))
+                ws.send(JSON.stringify({ type: 'PROJETOS', lista }))
+                break
+              }
+            }
+          } catch (e) {
+            ws.send(JSON.stringify({ type: 'CHAT', evento: { kind: 'erro', texto: String(e) } }))
+          }
+        })
       })
 
       const tick = async () => {
@@ -343,7 +442,7 @@ export function claudeWatcher(): Plugin {
 
       tick()
       timer = setInterval(tick, POLL_MS)
-      server.httpServer?.on('close', () => { clearInterval(timer); wss?.close() })
+      server.httpServer?.on('close', () => { clearInterval(timer); orq.parar(); wss?.close() })
     },
   }
 }

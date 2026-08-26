@@ -1,17 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Phaser from 'phaser'
 import { OfficeScene } from './office/OfficeScene'
 import { bus } from './office/bus'
 import { useOfficeStore } from './store/useOfficeStore'
+import { Chat } from './components/Chat'
+import { PainelTranscript } from './components/PainelTranscript'
 import type { AgentStatus } from './types/state'
-
-const COR_ESTADO: Record<AgentStatus, string> = {
-  idle: 'var(--off)',
-  working: 'var(--busy)',
-  done: 'var(--ok)',
-  checkpoint: 'var(--warn)',
-  delivering: 'var(--busy)',
-}
 
 /**
  * O jogo Phaser vive fora do React de propósito.
@@ -20,6 +14,14 @@ const COR_ESTADO: Record<AgentStatus, string> = {
  * criação do segundo e levava o canvas junto — tela preta.
  */
 let jogoGlobal: Phaser.Game | null = null
+
+const COR_ESTADO: Record<AgentStatus, string> = {
+  idle: 'var(--off)',
+  working: 'var(--busy)',
+  done: 'var(--ok)',
+  checkpoint: 'var(--warn)',
+  delivering: 'var(--busy)',
+}
 
 const ROTULO_ESTADO: Record<AgentStatus, string> = {
   idle: 'aguardando',
@@ -31,11 +33,15 @@ const ROTULO_ESTADO: Record<AgentStatus, string> = {
 
 export default function App() {
   const palco = useRef<HTMLDivElement>(null)
+  const [aviso, setAviso] = useState<string | null>(null)
 
-  const { sessions, selectedId, connected, select, connect } = useOfficeStore()
+  const {
+    sessions, selectedId, connected, transcript,
+    connect, select, abrirTranscript,
+  } = useOfficeStore()
   const atual = sessions.find((s) => s.sessionId === selectedId) ?? null
 
-  useEffect(() => connect(), [connect])
+  useEffect(() => { connect() }, [connect])
 
   // Phaser sobe uma vez só, e fica de pé enquanto a página viver.
   useEffect(() => {
@@ -51,10 +57,20 @@ export default function App() {
     })
   }, [])
 
-  // Cada snapshot vai pro bus; a cena consome quando estiver de pé.
+  // Clique no bonequino abre o transcript daquele especialista.
   useEffect(() => {
-    bus.publicar(atual?.agents ?? null)
-  }, [atual])
+    bus.aoClicar((agent) => {
+      if (!agent.agentId) {
+        setAviso(`${agent.name} ainda não foi acionado nesta demanda.`)
+        setTimeout(() => setAviso(null), 3200)
+        return
+      }
+      abrirTranscript(agent.agentId, agent.name)
+    })
+  }, [abrirTranscript])
+
+  // Cada snapshot vai pro bus; a cena consome quando estiver de pé.
+  useEffect(() => { bus.publicar(atual?.agents ?? null) }, [atual])
 
   return (
     <div className="app">
@@ -92,7 +108,10 @@ export default function App() {
       )}
 
       <div className="corpo">
+        <Chat />
+
         <div className="palco" ref={palco}>
+          {aviso && <div className="toast">{aviso}</div>}
           {!connected && (
             <div className="aviso">
               <div>Sem conexão com o watcher.</div>
@@ -101,42 +120,40 @@ export default function App() {
           )}
         </div>
 
-        <aside className="lateral">
-          <h2>Time</h2>
-          {atual?.agents.map((a) => (
-            <div className="papel" key={a.id}>
-              <span className="nome">{a.name}</span>
-              <span className="estado" style={{ color: COR_ESTADO[a.status] }}>
-                {ROTULO_ESTADO[a.status]}
-              </span>
-              {a.detail && <span className="oque">{a.tool} · {a.detail}</span>}
-            </div>
-          )) ?? <p className="vazio">Nenhuma sessão ativa.</p>}
+        {transcript ? (
+          <PainelTranscript />
+        ) : (
+          <aside className="lateral">
+            <h2>Time</h2>
+            {atual?.agents.map((a) => (
+              <div
+                className={`papel ${a.role !== 'orquestrador' && a.agentId ? 'clicavel' : ''}`}
+                key={a.id}
+                onClick={() => a.role !== 'orquestrador' && a.agentId && abrirTranscript(a.agentId, a.name)}
+              >
+                <span className="nome">{a.name}</span>
+                <span className="estado" style={{ color: COR_ESTADO[a.status] }}>
+                  {ROTULO_ESTADO[a.status]}
+                </span>
+                {a.detail && <span className="oque">{a.tool} · {a.detail}</span>}
+              </div>
+            )) ?? <p className="vazio">Nenhuma sessão ativa.</p>}
 
-          <h2>Tarefas da demanda</h2>
-          {atual?.tasks.length
-            ? atual.tasks.map((t) => (
-                <div className={`tarefa ${t.status}`} key={t.id}>
-                  <span className="marca">
-                    {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '◐' : '○'}
-                  </span>
-                  <span className="texto">{t.subject}</span>
-                </div>
-              ))
-            : <p className="vazio">Nenhuma tarefa registrada nesta sessão.</p>}
+            <h2>Tarefas da demanda</h2>
+            {atual?.tasks.length
+              ? atual.tasks.map((t) => (
+                  <div className={`tarefa ${t.status}`} key={t.id}>
+                    <span className="marca">
+                      {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '◐' : '○'}
+                    </span>
+                    <span className="texto">{t.subject}</span>
+                  </div>
+                ))
+              : <p className="vazio">Nenhuma tarefa registrada nesta sessão.</p>}
 
-          {atual?.agents.some((a) => a.description) && (
-            <>
-              <h2>Delegações</h2>
-              {atual.agents.filter((a) => a.description).map((a) => (
-                <div className="tarefa" key={`d-${a.id}`}>
-                  <span className="marca">→</span>
-                  <span className="texto"><b>{a.name}</b> · {a.description}</span>
-                </div>
-              ))}
-            </>
-          )}
-        </aside>
+            <p className="dica">Clique num bonequino para ver o que ele está pensando e fazendo.</p>
+          </aside>
+        )}
       </div>
     </div>
   )

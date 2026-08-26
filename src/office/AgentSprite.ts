@@ -5,6 +5,7 @@ import Phaser from 'phaser'
 import { avatarKeys, DESK_KEYS, FURNITURE_KEYS, type CharacterName } from './assetKeys'
 import { COLORS } from './palette'
 import type { OfficeAgent, AgentStatus } from '@/types/state'
+import { bus } from './bus'
 
 const AVATAR_SCALE = 0.8
 
@@ -74,6 +75,14 @@ export class AgentSprite {
     this.avatar = scene.add.image(x, y - 70, avatarKeys(characterName).talk)
       .setOrigin(0.5, 0.5).setScale(AVATAR_SCALE).setDepth(y)
     this.avatarDisplayH = this.avatar.displayHeight
+
+    // O orquestrador não abre painel — ele é o próprio chat.
+    if (agent.role !== 'orquestrador') {
+      this.avatar.setInteractive({ useHandCursor: true })
+      this.avatar.on('pointerover', () => this.avatar.setTint(0xbfd8ff))
+      this.avatar.on('pointerout', () => this.avatar.clearTint())
+      this.avatar.on('pointerdown', () => bus.clicar(this.agent))
+    }
 
     this.deskTable = scene.add.image(x, y, FURNITURE_KEYS.deskWood)
       .setOrigin(0.5, 0.5).setScale(1.3).setDepth(y + 1)

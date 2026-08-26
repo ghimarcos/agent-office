@@ -1,60 +1,180 @@
 import { create } from 'zustand'
-import type { OfficeState, WsMessage } from '@/types/state'
+import type { OfficeState, EntradaTranscript } from '@/types/state'
+
+export interface Bloco {
+  id: string
+  autor: 'voce' | 'claude' | 'sistema'
+  tipo: 'texto' | 'pensando' | 'ferramenta' | 'erro' | 'permissao'
+  texto: string
+  detalhe?: string
+  /** Presente quando tipo === 'permissao'. */
+  permissao?: { id: string; ferramenta: string; alvo: string; regra: string }
+  /** 'aprovada' | 'sempre' | 'recusada' — trava os botões depois de decidir. */
+  resolvida?: string
+}
+
+interface Projeto { chave: string; nome: string }
 
 interface Store {
   sessions: OfficeState[]
   selectedId: string | null
   connected: boolean
+  blocos: Bloco[]
+  pensando: boolean
+  projetos: Projeto[]
+  projetoAtivo: string | null
+  /** Sessão que o chat está conduzindo — o escritório segue ela. */
+  sessaoChat: string | null
+  transcript: { agentId: string; nome: string; entradas: EntradaTranscript[] } | null
+  carregandoTranscript: boolean
+
   select: (id: string) => void
   connect: () => void
+  enviar: (texto: string) => void
+  escolherProjeto: (chave: string) => void
+  responderPermissao: (blocoId: string, id: string, acao: 'aprovar' | 'aprovar_sempre' | 'recusar') => void
+  abrirTranscript: (agentId: string, nome: string) => void
+  fecharTranscript: () => void
+}
+
+let ws: WebSocket | null = null
+/**
+ * A conexão vive fora do ciclo do React. Em StrictMode o efeito monta, limpa e
+ * monta de novo; fechar o socket na limpeza disparava o `onclose`, que agendava
+ * uma reconexão — e aí sobravam dois sockets entregando cada mensagem duas vezes.
+ */
+let conexaoIniciada = false
+let seq = 0
+const novoId = () => `b${++seq}`
+
+const enviarWs = (msg: unknown) => {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
 }
 
 export const useOfficeStore = create<Store>((set, get) => ({
   sessions: [],
   selectedId: null,
   connected: false,
+  blocos: [],
+  pensando: false,
+  projetos: [],
+  projetoAtivo: null,
+  sessaoChat: null,
+  transcript: null,
+  carregandoTranscript: false,
 
   select: (id) => set({ selectedId: id }),
 
   connect: () => {
+    if (conexaoIniciada) return
+    conexaoIniciada = true
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-    let ws: WebSocket
     let retry: ReturnType<typeof setTimeout>
 
     const open = () => {
       ws = new WebSocket(url)
 
-      ws.onopen = () => set({ connected: true })
+      ws.onopen = () => {
+        set({ connected: true })
+        enviarWs({ type: 'PROJETOS' })
+      }
 
       ws.onmessage = (ev) => {
-        let msg: WsMessage
+        let msg: any
         try { msg = JSON.parse(ev.data) } catch { return }
-        if (msg.type !== 'SNAPSHOT') return
 
-        const { selectedId } = get()
-        // Mantém a sessão escolhida se ela ainda existir; senão pega a primeira ocupada.
-        const ainda = msg.sessions.some((s) => s.sessionId === selectedId)
-        const proxima = msg.sessions.find((s) => s.status === 'running') ?? msg.sessions[0]
-        set({
-          sessions: msg.sessions,
-          selectedId: ainda ? selectedId : (proxima?.sessionId ?? null),
-        })
+        if (msg.type === 'SNAPSHOT') {
+          const { selectedId, sessaoChat } = get()
+          // A sessão do chat tem prioridade: é o time que o painel representa.
+          const doChat = sessaoChat && msg.sessions.some((s: OfficeState) => s.sessionId === sessaoChat)
+            ? sessaoChat : null
+          const ainda = msg.sessions.some((s: OfficeState) => s.sessionId === selectedId)
+          const proxima = msg.sessions.find((s: OfficeState) => s.status === 'running') ?? msg.sessions[0]
+          set({
+            sessions: msg.sessions,
+            selectedId: doChat ?? (ainda ? selectedId : (proxima?.sessionId ?? null)),
+          })
+          return
+        }
+
+        if (msg.type === 'PROJETOS') { set({ projetos: msg.lista ?? [] }); return }
+
+        if (msg.type === 'TRANSCRIPT') {
+          const atual = get().transcript
+          if (!atual || atual.agentId !== msg.agentId) return
+          set({ transcript: { ...atual, entradas: msg.entradas ?? [] }, carregandoTranscript: false })
+          return
+        }
+
+        if (msg.type !== 'CHAT') return
+        const e = msg.evento
+
+        if (e.kind === 'inicio') {
+          set((st) => ({
+            projetoAtivo: e.projeto,
+            sessaoChat: e.sessionId ?? null,
+            pensando: false,
+            blocos: [...st.blocos, {
+              id: novoId(), autor: 'sistema', tipo: 'texto',
+              texto: `Orquestrador aberto em ${e.projeto}.`,
+            }],
+          }))
+          return
+        }
+
+        if (e.kind === 'fim') { set({ pensando: false }); return }
+
+        const bloco: Bloco =
+          e.kind === 'permissao'
+            ? { id: novoId(), autor: 'claude', tipo: 'permissao', texto: e.ferramenta, detalhe: e.alvo,
+                permissao: { id: e.id, ferramenta: e.ferramenta, alvo: e.alvo, regra: e.regra } }
+            : e.kind === 'ferramenta'
+              ? { id: novoId(), autor: 'claude', tipo: 'ferramenta', texto: e.nome, detalhe: e.detalhe }
+              : e.kind === 'pensando'
+                ? { id: novoId(), autor: 'claude', tipo: 'pensando', texto: e.texto }
+                : e.kind === 'erro'
+                  ? { id: novoId(), autor: 'sistema', tipo: 'erro', texto: e.texto }
+                  : { id: novoId(), autor: 'claude', tipo: 'texto', texto: e.texto }
+
+        set((st) => ({ blocos: [...st.blocos, bloco] }))
       }
 
-      ws.onclose = () => {
-        set({ connected: false })
-        retry = setTimeout(open, 2000)
-      }
-
-      ws.onerror = () => ws.close()
+      ws.onclose = () => { set({ connected: false }); retry = setTimeout(open, 2000) }
+      ws.onerror = () => ws?.close()
     }
 
     open()
-    return () => { clearTimeout(retry); ws?.close() }
+    // Sem cleanup de propósito: o socket acompanha a página, não o componente.
   },
-}))
 
-export function sessaoAtual(): OfficeState | null {
-  const { sessions, selectedId } = useOfficeStore.getState()
-  return sessions.find((s) => s.sessionId === selectedId) ?? null
-}
+  enviar: (texto) => {
+    set((st) => ({
+      pensando: true,
+      blocos: [...st.blocos, { id: novoId(), autor: 'voce', tipo: 'texto', texto }],
+    }))
+    enviarWs({ type: 'CHAT_ENVIAR', texto })
+  },
+
+  escolherProjeto: (chave) => {
+    set({ blocos: [], pensando: false })
+    enviarWs({ type: 'CHAT_PROJETO', chave })
+  },
+
+  responderPermissao: (blocoId, id, acao) => {
+    set((st) => ({
+      pensando: acao !== 'recusar',
+      blocos: st.blocos.map((b) =>
+        b.id === blocoId
+          ? { ...b, resolvida: acao === 'recusar' ? 'recusada' : acao === 'aprovar_sempre' ? 'sempre' : 'aprovada' }
+          : b),
+    }))
+    enviarWs({ type: 'PERMISSAO', id, acao })
+  },
+
+  abrirTranscript: (agentId, nome) => {
+    set({ transcript: { agentId, nome, entradas: [] }, carregandoTranscript: true })
+    enviarWs({ type: 'TRANSCRIPT', agentId })
+  },
+
+  fecharTranscript: () => set({ transcript: null }),
+}))

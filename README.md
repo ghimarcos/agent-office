@@ -4,7 +4,11 @@ Escritório 2D em tempo real para o seu time de agentes do Claude Code.
 
 Cada especialista tem uma mesa. Quando o Claude Code delega uma etapa, o bonequino
 correspondente acende a tela e mostra o que está fazendo agora — a ferramenta, o
-arquivo e há quanto tempo. Sem abrir terminal nenhum.
+arquivo e há quanto tempo.
+
+E você não precisa de terminal: **o chat da esquerda é o Orquestrador**. Você manda
+a demanda ali, ele delega, e você acompanha os bonequinos trabalhando. **Clicar num
+bonequino** abre o que aquele especialista recebeu, está pensando e está fazendo.
 
 ```
 ┌─ Orquestrador ─┐  ┌─ Arquiteto ─┐
@@ -19,6 +23,26 @@ arquivo e há quanto tempo. Sem abrir terminal nenhum.
 
 ## Como funciona
 
+### O chat
+
+O servidor mantém **um processo Claude Code de longa duração** por projeto, falando
+`stream-json` pelos dois lados: recebe seus turnos por stdin e devolve pensamento,
+texto e chamadas de ferramenta em streaming. O contexto vive no processo, então a
+conversa tem memória de ponta a ponta.
+
+**Permissões.** Em modo headless o CLI não pergunta — ele emite
+`system/permission_denied` e segue, sem executar a ação. O painel captura esse
+evento e mostra um card com a ferramenta e o alvo exato, com três botões:
+*Aprovar uma vez*, *Sempre permitir* e *Recusar*. Ao aprovar, o processo renasce
+com `--resume` (contexto intacto) somando a regra ao `--allowedTools` e refaz a
+ação. *Sempre permitir* também grava a regra no `.claude/settings.local.json` do
+projeto.
+
+> O modo `manual` é obrigatório: é o único em que o CLI emite o evento de negação.
+> Sem ele a recusa chega só como texto e não há como montar o card.
+
+### O escritório
+
 Não há integração, webhook nem daemon. O painel lê o que o Claude Code já grava
 no disco, em `~/.claude`:
 
@@ -28,7 +52,11 @@ no disco, em `~/.claude`:
 | `projects/<slug>/<sessão>/subagents/*.meta.json` | qual especialista foi acionado e para quê |
 | o `.jsonl` irmão de cada subagent | ferramenta em uso, arquivo, timestamp |
 | `tasks/<sessão>/*.json` | lista de tarefas da demanda |
-| `~/.claude/projetos.json` *(opcional)* | portas dos serviços, para o indicador no topo |
+| `~/.claude/projetos.json` | pastas e portas de cada projeto — alimenta o seletor do chat e os indicadores do topo |
+
+Clicar num bonequino lê o `.jsonl` daquele subagent por inteiro e mostra, em ordem:
+o prompt que o Orquestrador delegou, cada bloco de raciocínio e cada ferramenta
+usada. Atualiza a cada 2 s enquanto o painel estiver aberto.
 
 Um plugin do Vite (`src/watcher/claudeWatcher.ts`) consolida tudo a cada 1,5 s e
 empurra por WebSocket. A cena é Phaser 3.
