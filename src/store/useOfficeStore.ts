@@ -4,10 +4,12 @@ import type { OfficeState, EntradaTranscript } from '@/types/state'
 export interface Bloco {
   id: string
   autor: 'voce' | 'claude' | 'sistema'
-  tipo: 'texto' | 'pensando' | 'ferramenta' | 'erro' | 'permissao'
+  tipo: 'texto' | 'pensando' | 'ferramenta' | 'erro' | 'permissao' | 'fila'
   texto: string
   detalhe?: string
   permissao?: { id: string; ferramenta: string; alvo: string; regra: string }
+  /** Presente quando tipo === 'fila': a demanda esperando em outro projeto. */
+  fila?: { alvo: string; alvoNome: string; resumo: string }
   resolvida?: string
 }
 
@@ -28,6 +30,12 @@ interface Store {
   nomePorProjeto: Record<string, string>
 
   escolhaManual: boolean
+  /** Projeto cujo time está trabalhando agora — só um por vez. */
+  ocupadoPor: string | null
+  /** Chaves na fila, na ordem. */
+  fila: string[]
+  /** Caminho do último arquivo solto no chat, para colar na mensagem. */
+  anexoRecebido: { caminho: string; nome: string } | null
   transcript: { agentId: string; nome: string; entradas: EntradaTranscript[] } | null
   carregandoTranscript: boolean
 
@@ -38,6 +46,9 @@ interface Store {
   responderPermissao: (blocoId: string, id: string, acao: 'aprovar' | 'aprovar_sempre' | 'recusar') => void
   abrirTranscript: (agentId: string, nome: string, silencioso?: boolean) => void
   fecharTranscript: () => void
+  responderFila: (blocoId: string, comecar: boolean) => void
+  enviarAnexo: (arquivo: File) => void
+  limparAnexo: () => void
 }
 
 let ws: WebSocket | null = null
@@ -52,6 +63,33 @@ const novoId = () => `b${++seq}`
 
 const enviarWs = (msg: unknown) => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
+}
+
+/** Um evento do servidor vira um bloco da conversa. `null` = não se desenha. */
+function eventoParaBloco(e: any): Bloco | null {
+  switch (e.kind) {
+    case 'inicio':
+      return { id: novoId(), autor: 'sistema', tipo: 'texto', texto: `Orquestrador aberto em ${e.projeto}.` }
+    case 'permissao':
+      return { id: novoId(), autor: 'claude', tipo: 'permissao', texto: e.ferramenta, detalhe: e.alvo,
+               permissao: { id: e.id, ferramenta: e.ferramenta, alvo: e.alvo, regra: e.regra } }
+    case 'ferramenta':
+      return { id: novoId(), autor: 'claude', tipo: 'ferramenta', texto: e.nome, detalhe: e.detalhe }
+    case 'pensando':
+      return { id: novoId(), autor: 'claude', tipo: 'pensando', texto: e.texto }
+    case 'erro':
+      return { id: novoId(), autor: 'sistema', tipo: 'erro', texto: e.texto }
+    case 'enfileirado':
+      return { id: novoId(), autor: 'sistema', tipo: 'texto',
+               texto: `O time está trabalhando em ${e.ocupadoPor}. Sua demanda ficou na fila (posição ${e.posicao}).` }
+    case 'fila_pergunta':
+      return { id: novoId(), autor: 'claude', tipo: 'fila', texto: e.alvoNome,
+               fila: { alvo: e.alvo, alvoNome: e.alvoNome, resumo: e.resumo } }
+    case 'texto':
+      return { id: novoId(), autor: 'claude', tipo: 'texto', texto: e.texto }
+    default:
+      return null
+  }
 }
 
 /** Anexa um bloco à conversa do projeto dono do evento. */
@@ -71,6 +109,9 @@ export const useOfficeStore = create<Store>((set, get) => ({
   sessaoPorProjeto: {},
   nomePorProjeto: {},
   escolhaManual: false,
+  ocupadoPor: null,
+  fila: [],
+  anexoRecebido: null,
   transcript: null,
   carregandoTranscript: false,
 
@@ -111,6 +152,45 @@ export const useOfficeStore = create<Store>((set, get) => ({
 
         if (msg.type === 'PROJETOS') { set({ projetos: msg.lista ?? [] }); return }
 
+        if (msg.type === 'HISTORICO') {
+          // Conversa gravada em disco: reconstrói a aba daquele projeto.
+          const eventos: any[] = msg.eventos ?? []
+          const blocos = eventos.map(eventoParaBloco).filter(Boolean) as Bloco[]
+          const ultimoInicio = [...eventos].reverse().find((e) => e.kind === 'inicio')
+          set((st) => ({
+            blocosPorProjeto: { ...st.blocosPorProjeto, [msg.chave]: blocos },
+            nomePorProjeto: ultimoInicio
+              ? { ...st.nomePorProjeto, [msg.chave]: ultimoInicio.projeto }
+              : st.nomePorProjeto,
+            sessaoPorProjeto: ultimoInicio?.sessionId
+              ? { ...st.sessaoPorProjeto, [msg.chave]: ultimoInicio.sessionId }
+              : st.sessaoPorProjeto,
+          }))
+          return
+        }
+
+        if (msg.type === 'ANEXO_OK') {
+          set({ anexoRecebido: { caminho: msg.caminho, nome: msg.nome } })
+          return
+        }
+
+        if (msg.type === 'ANEXO_ERRO') {
+          const chave = get().chaveAtiva
+          if (chave) {
+            set((st) => ({
+              blocosPorProjeto: anexar(st.blocosPorProjeto, chave, {
+                id: novoId(), autor: 'sistema', tipo: 'erro', texto: msg.texto,
+              }),
+            }))
+          }
+          return
+        }
+
+        if (msg.type === 'FILA') {
+          set({ ocupadoPor: msg.ocupado ?? null, fila: (msg.fila ?? []).map((f: any) => f.chave) })
+          return
+        }
+
         if (msg.type === 'TRANSCRIPT') {
           const atual = get().transcript
           if (!atual || atual.agentId !== msg.agentId) return
@@ -147,19 +227,8 @@ export const useOfficeStore = create<Store>((set, get) => ({
           return
         }
 
-        const bloco: Bloco =
-          e.kind === 'permissao'
-            ? { id: novoId(), autor: 'claude', tipo: 'permissao', texto: e.ferramenta, detalhe: e.alvo,
-                permissao: { id: e.id, ferramenta: e.ferramenta, alvo: e.alvo, regra: e.regra } }
-            : e.kind === 'ferramenta'
-              ? { id: novoId(), autor: 'claude', tipo: 'ferramenta', texto: e.nome, detalhe: e.detalhe }
-              : e.kind === 'pensando'
-                ? { id: novoId(), autor: 'claude', tipo: 'pensando', texto: e.texto }
-                : e.kind === 'erro'
-                  ? { id: novoId(), autor: 'sistema', tipo: 'erro', texto: e.texto }
-                  : { id: novoId(), autor: 'claude', tipo: 'texto', texto: e.texto }
-
-        set((st) => ({ blocosPorProjeto: anexar(st.blocosPorProjeto, chave, bloco) }))
+        const bloco = eventoParaBloco(e)
+        if (bloco) set((st) => ({ blocosPorProjeto: anexar(st.blocosPorProjeto, chave, bloco) }))
       }
 
       ws.onclose = () => { set({ connected: false }); setTimeout(open, 2000) }
@@ -214,4 +283,26 @@ export const useOfficeStore = create<Store>((set, get) => ({
   },
 
   fecharTranscript: () => set({ transcript: null }),
+
+  enviarAnexo: (arquivo) => {
+    const leitor = new FileReader()
+    leitor.onload = () => {
+      const dados = String(leitor.result).split(',')[1] ?? ''
+      enviarWs({ type: 'ANEXO', nome: arquivo.name, dados })
+    }
+    leitor.readAsDataURL(arquivo)
+  },
+
+  limparAnexo: () => set({ anexoRecebido: null }),
+
+  responderFila: (blocoId, comecar) => {
+    set((st) => ({
+      blocosPorProjeto: Object.fromEntries(
+        Object.entries(st.blocosPorProjeto).map(([k, bs]) => [
+          k, bs.map((b) => (b.id === blocoId ? { ...b, resolvida: comecar ? 'comecou' : 'adiada' } : b)),
+        ]),
+      ),
+    }))
+    enviarWs({ type: 'FILA_RESPOSTA', comecar })
+  },
 }))

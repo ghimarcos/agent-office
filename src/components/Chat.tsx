@@ -37,12 +37,42 @@ function CardPermissao({ bloco }: { bloco: Bloco }) {
   )
 }
 
+/** "O time terminou aqui. Começo a demanda que está esperando no outro projeto?" */
+function CardFila({ bloco }: { bloco: Bloco }) {
+  const responder = useOfficeStore((s) => s.responderFila)
+  const escolherProjeto = useOfficeStore((s) => s.escolherProjeto)
+  const f = bloco.fila!
+  const decidida = bloco.resolvida
+
+  return (
+    <div className={`fila-card ${decidida ?? ''}`}>
+      <div className="cabeca">
+        {decidida === 'comecou' ? `Começando em ${f.alvoNome}`
+          : decidida === 'adiada' ? 'Guardado na fila'
+          : 'Time livre — tem demanda esperando'}
+      </div>
+      <div className="alvo-projeto">{f.alvoNome}</div>
+      <div className="resumo">{f.resumo}</div>
+      {!decidida && (
+        <div className="botoes">
+          <button className="ok" onClick={() => { responder(bloco.id, true); escolherProjeto(f.alvo) }}>
+            Começar agora
+          </button>
+          <button className="nao" onClick={() => responder(bloco.id, false)}>Depois</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function Chat() {
   const {
     projetos, chaveAtiva, blocosPorProjeto, pensandoPorProjeto,
-    connected, enviar, escolherProjeto,
+    ocupadoPor, fila, anexoRecebido, nomePorProjeto,
+    connected, enviar, escolherProjeto, enviarAnexo, limparAnexo,
   } = useOfficeStore()
   const [texto, setTexto] = useState('')
+  const [arrastando, setArrastando] = useState(false)
   const fim = useRef<HTMLDivElement>(null)
 
   // Cada projeto tem a sua conversa; trocar de aba só troca o que está à vista.
@@ -50,6 +80,20 @@ export function Chat() {
   const pensando = chaveAtiva ? pensandoPorProjeto[chaveAtiva] ?? false : false
 
   useEffect(() => { fim.current?.scrollIntoView({ behavior: 'smooth' }) }, [blocos.length, pensando])
+
+  // Arquivo solto vira caminho colado na mensagem — é assim que qualquer
+  // sessão do Claude Code consegue abri-lo depois.
+  useEffect(() => {
+    if (!anexoRecebido) return
+    setTexto((t) => (t ? t.trimEnd() + '\n' : '') + `[anexo: ${anexoRecebido.caminho}]\n`)
+    limparAnexo()
+  }, [anexoRecebido, limparAnexo])
+
+  const soltar = (e: React.DragEvent) => {
+    e.preventDefault()
+    setArrastando(false)
+    for (const f of Array.from(e.dataTransfer.files)) enviarAnexo(f)
+  }
 
   const submeter = () => {
     const t = texto.trim()
@@ -69,14 +113,23 @@ export function Chat() {
           {projetos.map((p) => {
             // Ponto ao lado do nome: esse projeto tem conversa viva em segundo plano.
             const vivo = (blocosPorProjeto[p.chave]?.length ?? 0) > 0
+            const trabalhando = ocupadoPor === p.chave
+            const naFila = fila.filter((k) => k === p.chave).length
             return (
               <option key={p.chave} value={p.chave}>
-                {vivo ? '● ' : ''}{p.nome}
+                {trabalhando ? '◐ ' : vivo ? '● ' : ''}{p.nome}
+                {naFila ? ` (${naFila} na fila)` : ''}
               </option>
             )
           })}
         </select>
       </div>
+
+      {ocupadoPor && ocupadoPor !== chaveAtiva && (
+        <div className="faixa-ocupado">
+          Time trabalhando em <b>{nomePorProjeto[ocupadoPor] ?? ocupadoPor}</b>. O que você mandar aqui entra na fila.
+        </div>
+      )}
 
       <div className="chat-fluxo">
         {!blocos.length && (
@@ -88,6 +141,7 @@ export function Chat() {
 
         {blocos.map((b) => {
           if (b.tipo === 'permissao') return <CardPermissao key={b.id} bloco={b} />
+          if (b.tipo === 'fila') return <CardFila key={b.id} bloco={b} />
           if (b.tipo === 'pensando') return <BlocoPensando key={b.id} texto={b.texto} />
           if (b.tipo === 'ferramenta') {
             return (
@@ -108,7 +162,12 @@ export function Chat() {
         <div ref={fim} />
       </div>
 
-      <div className="chat-entrada">
+      <div
+        className={`chat-entrada ${arrastando ? 'arrastando' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); setArrastando(true) }}
+        onDragLeave={() => setArrastando(false)}
+        onDrop={soltar}
+      >
         <textarea
           value={texto}
           placeholder={!connected ? 'Sem conexão' : !chaveAtiva ? 'Escolha um projeto primeiro' : 'Manda a demanda…'}
@@ -119,6 +178,7 @@ export function Chat() {
           }}
         />
         <button onClick={submeter} disabled={!connected || !chaveAtiva || !texto.trim()}>Enviar</button>
+        {arrastando && <div className="solte-aqui">Solte para anexar</div>}
       </div>
     </section>
   )

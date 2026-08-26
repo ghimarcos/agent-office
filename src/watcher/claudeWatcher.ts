@@ -18,7 +18,8 @@ import os from 'node:os'
 import net from 'node:net'
 import readline from 'node:readline'
 import type { OfficeAgent, OfficeState, OfficeTask, OfficeService, AgentStatus, EntradaTranscript } from '../types/state'
-import { Orquestrador, type EventoChat } from './orquestrador'
+import { type EventoChat } from './orquestrador'
+import { Gerente } from './gerente'
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude')
 const POLL_MS = 1500
@@ -423,30 +424,26 @@ export function claudeWatcher(): Plugin {
         }
       }
 
-      // Um orquestrador por projeto, todos vivos ao mesmo tempo: trocar de
-      // projeto no painel não pode interromper o trabalho já em andamento.
-      const orquestradores = new Map<string, Orquestrador>()
-      const pegar = (chave: string) => {
-        let o = orquestradores.get(chave)
-        if (!o) {
-          o = new Orquestrador(chave, (evento: EventoChat) => {
-            broadcast(JSON.stringify({ type: 'CHAT', evento }))
-          })
-          orquestradores.set(chave, o)
-        }
-        return o
-      }
+      // Um orquestrador por projeto, mas uma demanda por vez: o gerente
+      // enfileira o que chega para outro projeto e só começa com o seu aval.
+      const gerente = new Gerente((evento: EventoChat) => {
+        broadcast(JSON.stringify({ type: 'CHAT', evento }))
+      })
 
-      wss.on('connection', (ws) => {
+      // Reata as conversas de antes do último desligamento.
+      gerente.retomar().then(
+        () => broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() })),
+        (e) => server.config.logger.warn(`[agent-office] falha ao retomar: ${e}`),
+      )
+
+      wss.on('connection', async (ws) => {
         if (lastJson) ws.send(lastJson)
-        // Reconexão: reanuncia todos os projetos que estão de pé.
-        for (const o of orquestradores.values()) {
-          if (!o.projetoAtual) continue
-          ws.send(JSON.stringify({
-            type: 'CHAT',
-            evento: { kind: 'inicio', chave: o.chave, projeto: o.projetoAtual, cwd: '', sessionId: o.sessao, retomado: true },
-          }))
+        // Reconexão ou página recarregada: devolve a conversa gravada de cada projeto.
+        for (const chave of await gerente.projetosComConversa()) {
+          const eventos = await gerente.historico(chave)
+          if (eventos.length) ws.send(JSON.stringify({ type: 'HISTORICO', chave, eventos }))
         }
+        ws.send(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
 
         ws.on('message', async (raw) => {
           let msg: any
@@ -456,21 +453,40 @@ export function claudeWatcher(): Plugin {
             switch (msg.type) {
               case 'CHAT_ENVIAR':
                 if (typeof msg.texto === 'string' && msg.texto.trim()) {
-                  pegar(String(msg.chave)).enviar(msg.texto)
+                  await gerente.enviar(String(msg.chave), msg.texto)
+                  broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
                 }
                 break
               case 'CHAT_PROJETO':
-                await pegar(String(msg.chave)).abrirProjeto()
+                await gerente.abrir(String(msg.chave))
                 break
-              case 'PERMISSAO': {
-                const o = pegar(String(msg.chave))
-                if (msg.acao === 'recusar') o.recusar(String(msg.id))
-                else await o.aprovar(String(msg.id), msg.acao === 'aprovar_sempre')
+              case 'FILA_RESPOSTA':
+                await gerente.responderFila(msg.comecar === true)
+                broadcast(JSON.stringify({ type: 'FILA', ...gerente.resumoFila() }))
                 break
-              }
+              case 'PERMISSAO':
+                if (msg.acao === 'recusar') gerente.recusar(String(msg.chave), String(msg.id))
+                else await gerente.aprovar(String(msg.chave), String(msg.id), msg.acao === 'aprovar_sempre')
+                break
               case 'TRANSCRIPT': {
                 const entradas = await lerTranscript(String(msg.agentId))
                 ws.send(JSON.stringify({ type: 'TRANSCRIPT', agentId: msg.agentId, entradas }))
+                break
+              }
+              case 'ANEXO': {
+                // Arquivo solto no chat vira arquivo em disco, e o caminho entra
+                // na mensagem — assim qualquer sessão do Claude Code consegue abrir.
+                const dados = Buffer.from(String(msg.dados ?? ''), 'base64')
+                if (dados.length > 20 * 1024 * 1024) {
+                  ws.send(JSON.stringify({ type: 'ANEXO_ERRO', texto: 'Arquivo acima de 20 MB.' }))
+                  break
+                }
+                const dir = path.join(CLAUDE_HOME, 'agent-office', 'anexos')
+                await fsp.mkdir(dir, { recursive: true })
+                const limpo = String(msg.nome ?? 'arquivo').replace(/[^\w.\-]/g, '_').slice(-80)
+                const destino = path.join(dir, `${Date.now()}-${limpo}`)
+                await fsp.writeFile(destino, dados)
+                ws.send(JSON.stringify({ type: 'ANEXO_OK', caminho: destino, nome: limpo }))
                 break
               }
               case 'PROJETOS': {
@@ -503,7 +519,7 @@ export function claudeWatcher(): Plugin {
       timer = setInterval(tick, POLL_MS)
       server.httpServer?.on('close', () => {
         clearInterval(timer)
-        for (const o of orquestradores.values()) o.parar()
+        gerente.parar()
         wss?.close()
       })
     },

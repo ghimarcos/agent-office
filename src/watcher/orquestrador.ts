@@ -26,6 +26,8 @@ type CorpoEvento =
   | { kind: 'permissao'; id: string; ferramenta: string; alvo: string; regra: string }
   | { kind: 'fim' }
   | { kind: 'erro'; texto: string }
+  | { kind: 'enfileirado'; posicao: number; ocupadoPor: string }
+  | { kind: 'fila_pergunta'; alvo: string; alvoNome: string; resumo: string }
 
 /** Todo evento carrega a chave do projeto de origem. */
 export type EventoChat = CorpoEvento & { chave: string }
@@ -66,7 +68,7 @@ function alvoDe(ferramenta: string, input: any): string {
 export class Orquestrador {
   private proc: ChildProcess | null = null
   private buf = ''
-  private sessionId = randomUUID()
+  private sessionId: string = randomUUID()
   private primeiroTurno = true
   private cwd = os.homedir()
   private addDirs: string[] = []
@@ -88,6 +90,21 @@ export class Orquestrador {
 
   get projetoAtual(): string { return this.projeto }
   get sessao(): string { return this.sessionId }
+  get regrasLiberadas(): string[] { return [...this.permitidas] }
+  /** Verdadeiro entre o envio de um turno e a chegada do `result`. */
+  get ocupado(): boolean { return this.turnoAberto }
+
+  private turnoAberto = false
+
+  /**
+   * Reata uma conversa de antes do servidor reiniciar. O processo sobe com
+   * `--resume`, então o contexto inteiro volta.
+   */
+  restaurar(sessionId: string, regras: string[]): void {
+    this.sessionId = sessionId
+    this.primeiroTurno = false
+    for (const r of regras) this.permitidas.add(r)
+  }
 
   private configurado = false
 
@@ -205,12 +222,14 @@ export class Orquestrador {
     }
 
     if (j.type === 'result') {
+      this.turnoAberto = false
       this.emitir({ kind: 'fim' })
     }
   }
 
   /** Manda um turno do usuário. Sobe o processo se ele tiver caído. */
   enviar(texto: string): void {
+    this.turnoAberto = true
     if (!this.proc) this.subir()
     const msg = { type: 'user', message: { role: 'user', content: [{ type: 'text', text: texto }] } }
     this.proc?.stdin?.write(JSON.stringify(msg) + '\n')
