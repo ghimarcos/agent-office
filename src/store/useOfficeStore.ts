@@ -7,9 +7,7 @@ export interface Bloco {
   tipo: 'texto' | 'pensando' | 'ferramenta' | 'erro' | 'permissao'
   texto: string
   detalhe?: string
-  /** Presente quando tipo === 'permissao'. */
   permissao?: { id: string; ferramenta: string; alvo: string; regra: string }
-  /** 'aprovada' | 'sempre' | 'recusada' — trava os botões depois de decidir. */
   resolvida?: string
 }
 
@@ -19,12 +17,17 @@ interface Store {
   sessions: OfficeState[]
   selectedId: string | null
   connected: boolean
-  blocos: Bloco[]
-  pensando: boolean
   projetos: Projeto[]
-  projetoAtivo: string | null
-  /** Sessão que o chat está conduzindo — o escritório segue ela. */
-  sessaoChat: string | null
+
+  /** Conversa, estado e sessão são guardados POR projeto: trocar de projeto no
+   *  painel não pode apagar o que o time estava fazendo no anterior. */
+  chaveAtiva: string | null
+  blocosPorProjeto: Record<string, Bloco[]>
+  pensandoPorProjeto: Record<string, boolean>
+  sessaoPorProjeto: Record<string, string>
+  nomePorProjeto: Record<string, string>
+
+  escolhaManual: boolean
   transcript: { agentId: string; nome: string; entradas: EntradaTranscript[] } | null
   carregandoTranscript: boolean
 
@@ -33,7 +36,7 @@ interface Store {
   enviar: (texto: string) => void
   escolherProjeto: (chave: string) => void
   responderPermissao: (blocoId: string, id: string, acao: 'aprovar' | 'aprovar_sempre' | 'recusar') => void
-  abrirTranscript: (agentId: string, nome: string) => void
+  abrirTranscript: (agentId: string, nome: string, silencioso?: boolean) => void
   fecharTranscript: () => void
 }
 
@@ -51,25 +54,32 @@ const enviarWs = (msg: unknown) => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
 }
 
+/** Anexa um bloco à conversa do projeto dono do evento. */
+const anexar = (mapa: Record<string, Bloco[]>, chave: string, bloco: Bloco) => ({
+  ...mapa,
+  [chave]: [...(mapa[chave] ?? []), bloco],
+})
+
 export const useOfficeStore = create<Store>((set, get) => ({
   sessions: [],
   selectedId: null,
   connected: false,
-  blocos: [],
-  pensando: false,
   projetos: [],
-  projetoAtivo: null,
-  sessaoChat: null,
+  chaveAtiva: null,
+  blocosPorProjeto: {},
+  pensandoPorProjeto: {},
+  sessaoPorProjeto: {},
+  nomePorProjeto: {},
+  escolhaManual: false,
   transcript: null,
   carregandoTranscript: false,
 
-  select: (id) => set({ selectedId: id }),
+  select: (id) => set({ selectedId: id, escolhaManual: true }),
 
   connect: () => {
     if (conexaoIniciada) return
     conexaoIniciada = true
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
-    let retry: ReturnType<typeof setTimeout>
 
     const open = () => {
       ws = new WebSocket(url)
@@ -84,15 +94,17 @@ export const useOfficeStore = create<Store>((set, get) => ({
         try { msg = JSON.parse(ev.data) } catch { return }
 
         if (msg.type === 'SNAPSHOT') {
-          const { selectedId, sessaoChat } = get()
-          // A sessão do chat tem prioridade: é o time que o painel representa.
-          const doChat = sessaoChat && msg.sessions.some((s: OfficeState) => s.sessionId === sessaoChat)
-            ? sessaoChat : null
+          const { selectedId, chaveAtiva, sessaoPorProjeto, escolhaManual } = get()
+          const doChat = chaveAtiva ? sessaoPorProjeto[chaveAtiva] : null
+          // A sessão do chat manda — a não ser que você tenha escolhido uma aba
+          // na mão, senão a escolha era desfeita a cada atualização.
+          const seguir = !escolhaManual && doChat
+            && msg.sessions.some((s: OfficeState) => s.sessionId === doChat) ? doChat : null
           const ainda = msg.sessions.some((s: OfficeState) => s.sessionId === selectedId)
           const proxima = msg.sessions.find((s: OfficeState) => s.status === 'running') ?? msg.sessions[0]
           set({
             sessions: msg.sessions,
-            selectedId: doChat ?? (ainda ? selectedId : (proxima?.sessionId ?? null)),
+            selectedId: seguir ?? (ainda ? selectedId : (proxima?.sessionId ?? null)),
           })
           return
         }
@@ -108,21 +120,32 @@ export const useOfficeStore = create<Store>((set, get) => ({
 
         if (msg.type !== 'CHAT') return
         const e = msg.evento
+        const chave: string = e.chave
+        if (!chave) return
 
         if (e.kind === 'inicio') {
           set((st) => ({
-            projetoAtivo: e.projeto,
-            sessaoChat: e.sessionId ?? null,
-            pensando: false,
-            blocos: [...st.blocos, {
-              id: novoId(), autor: 'sistema', tipo: 'texto',
-              texto: `Orquestrador aberto em ${e.projeto}.`,
-            }],
+            nomePorProjeto: { ...st.nomePorProjeto, [chave]: e.projeto },
+            sessaoPorProjeto: e.sessionId
+              ? { ...st.sessaoPorProjeto, [chave]: e.sessionId }
+              : st.sessaoPorProjeto,
+            escolhaManual: false,
+            pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: false },
+            // Retomada não repete o aviso de abertura.
+            blocosPorProjeto: e.retomado && st.blocosPorProjeto[chave]?.length
+              ? st.blocosPorProjeto
+              : anexar(st.blocosPorProjeto, chave, {
+                  id: novoId(), autor: 'sistema', tipo: 'texto',
+                  texto: `Orquestrador aberto em ${e.projeto}.`,
+                }),
           }))
           return
         }
 
-        if (e.kind === 'fim') { set({ pensando: false }); return }
+        if (e.kind === 'fim') {
+          set((st) => ({ pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: false } }))
+          return
+        }
 
         const bloco: Bloco =
           e.kind === 'permissao'
@@ -136,10 +159,10 @@ export const useOfficeStore = create<Store>((set, get) => ({
                   ? { id: novoId(), autor: 'sistema', tipo: 'erro', texto: e.texto }
                   : { id: novoId(), autor: 'claude', tipo: 'texto', texto: e.texto }
 
-        set((st) => ({ blocos: [...st.blocos, bloco] }))
+        set((st) => ({ blocosPorProjeto: anexar(st.blocosPorProjeto, chave, bloco) }))
       }
 
-      ws.onclose = () => { set({ connected: false }); retry = setTimeout(open, 2000) }
+      ws.onclose = () => { set({ connected: false }); setTimeout(open, 2000) }
       ws.onerror = () => ws?.close()
     }
 
@@ -148,31 +171,45 @@ export const useOfficeStore = create<Store>((set, get) => ({
   },
 
   enviar: (texto) => {
+    const chave = get().chaveAtiva
+    if (!chave) return
     set((st) => ({
-      pensando: true,
-      blocos: [...st.blocos, { id: novoId(), autor: 'voce', tipo: 'texto', texto }],
+      pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: true },
+      blocosPorProjeto: anexar(st.blocosPorProjeto, chave, {
+        id: novoId(), autor: 'voce', tipo: 'texto', texto,
+      }),
     }))
-    enviarWs({ type: 'CHAT_ENVIAR', texto })
+    enviarWs({ type: 'CHAT_ENVIAR', chave, texto })
   },
 
+  /** Só troca a conversa visível. O projeto anterior segue trabalhando. */
   escolherProjeto: (chave) => {
-    set({ blocos: [], pensando: false })
+    set({ chaveAtiva: chave, escolhaManual: false })
     enviarWs({ type: 'CHAT_PROJETO', chave })
   },
 
   responderPermissao: (blocoId, id, acao) => {
+    const chave = get().chaveAtiva
+    if (!chave) return
     set((st) => ({
-      pensando: acao !== 'recusar',
-      blocos: st.blocos.map((b) =>
-        b.id === blocoId
-          ? { ...b, resolvida: acao === 'recusar' ? 'recusada' : acao === 'aprovar_sempre' ? 'sempre' : 'aprovada' }
-          : b),
+      pensandoPorProjeto: { ...st.pensandoPorProjeto, [chave]: acao !== 'recusar' },
+      blocosPorProjeto: {
+        ...st.blocosPorProjeto,
+        [chave]: (st.blocosPorProjeto[chave] ?? []).map((b) =>
+          b.id === blocoId
+            ? { ...b, resolvida: acao === 'recusar' ? 'recusada' : acao === 'aprovar_sempre' ? 'sempre' : 'aprovada' }
+            : b),
+      },
     }))
-    enviarWs({ type: 'PERMISSAO', id, acao })
+    enviarWs({ type: 'PERMISSAO', chave, id, acao })
   },
 
-  abrirTranscript: (agentId, nome) => {
-    set({ transcript: { agentId, nome, entradas: [] }, carregandoTranscript: true })
+  abrirTranscript: (agentId, nome, silencioso = false) => {
+    // O refresh periódico é silencioso: esvaziar a lista para recarregar
+    // desmontava os itens e jogava o scroll de volta pro topo.
+    if (!silencioso || get().transcript?.agentId !== agentId) {
+      set({ transcript: { agentId, nome, entradas: [] }, carregandoTranscript: true })
+    }
     enviarWs({ type: 'TRANSCRIPT', agentId })
   },
 

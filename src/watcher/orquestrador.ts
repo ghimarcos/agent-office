@@ -16,14 +16,19 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 
-export type EventoChat =
-  | { kind: 'inicio'; projeto: string; cwd: string; sessionId: string }
+/** Todo evento carrega a chave do projeto: um projeto em segundo plano continua
+ *  trabalhando e seus eventos precisam ir para a conversa certa. */
+type CorpoEvento =
+  | { kind: 'inicio'; projeto: string; cwd: string; sessionId: string; retomado: boolean }
   | { kind: 'pensando'; texto: string }
   | { kind: 'texto'; texto: string }
   | { kind: 'ferramenta'; nome: string; detalhe: string }
   | { kind: 'permissao'; id: string; ferramenta: string; alvo: string; regra: string }
   | { kind: 'fim' }
   | { kind: 'erro'; texto: string }
+
+/** Todo evento carrega a chave do projeto de origem. */
+export type EventoChat = CorpoEvento & { chave: string }
 
 interface PedidoPermissao {
   id: string
@@ -72,34 +77,54 @@ export class Orquestrador {
   private inputsPorToolUse = new Map<string, { nome: string; input: any }>()
   private pendentes = new Map<string, PedidoPermissao>()
 
-  constructor(private emitir: (e: EventoChat) => void) {}
+  constructor(
+    readonly chave: string,
+    private aoEmitir: (e: EventoChat) => void,
+  ) {}
+
+  private emitir(e: CorpoEvento): void {
+    this.aoEmitir({ ...e, chave: this.chave })
+  }
 
   get projetoAtual(): string { return this.projeto }
   get sessao(): string { return this.sessionId }
 
-  /** Troca de projeto: descobre as pastas no registro e sobe um processo novo. */
-  async abrirProjeto(chave: string): Promise<void> {
+  private configurado = false
+
+  /**
+   * Prepara o projeto. Chamar de novo num orquestrador que já existe apenas
+   * reanuncia a conversa — o processo e o histórico continuam de pé, para que
+   * o trabalho iniciado num projeto siga rodando enquanto você olha outro.
+   */
+  async abrirProjeto(): Promise<void> {
+    if (this.configurado) {
+      this.emitir({
+        kind: 'inicio', projeto: this.projeto, cwd: this.cwd,
+        sessionId: this.sessionId, retomado: true,
+      })
+      return
+    }
+
     let registro: any = {}
     try { registro = JSON.parse(await fsp.readFile(REGISTRO, 'utf8')) } catch {}
-    const proj = registro[chave]
+    const proj = registro[this.chave]
     if (!proj?.servicos?.length) {
-      this.emitir({ kind: 'erro', texto: `Projeto "${chave}" não está em ~/.claude/projetos.json.` })
+      this.emitir({ kind: 'erro', texto: `Projeto "${this.chave}" não está em ~/.claude/projetos.json.` })
       return
     }
     const dirs: string[] = proj.servicos
       .filter((s: any) => s.default !== false)
       .map((s: any) => expandirTil(s.dir))
 
-    this.projeto = proj.nome ?? chave
+    this.projeto = proj.nome ?? this.chave
     this.cwd = dirs[0]
     this.addDirs = dirs.slice(1)
-    // Projeto novo, conversa nova.
-    this.sessionId = randomUUID()
-    this.primeiroTurno = true
-    this.permitidas.clear()
-    this.parar()
+    this.configurado = true
     this.subir()
-    this.emitir({ kind: 'inicio', projeto: this.projeto, cwd: this.cwd, sessionId: this.sessionId })
+    this.emitir({
+      kind: 'inicio', projeto: this.projeto, cwd: this.cwd,
+      sessionId: this.sessionId, retomado: false,
+    })
   }
 
   private argumentos(): string[] {

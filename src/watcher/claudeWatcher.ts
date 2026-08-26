@@ -16,6 +16,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
+import readline from 'node:readline'
 import type { OfficeAgent, OfficeState, OfficeTask, OfficeService, AgentStatus, EntradaTranscript } from '../types/state'
 import { Orquestrador, type EventoChat } from './orquestrador'
 
@@ -309,6 +310,46 @@ async function buildSnapshot(): Promise<OfficeState[]> {
 
 // ---------------------------------------------------------------- transcript
 
+/**
+ * Lê o transcript inteiro guardando apenas as linhas do próprio agente.
+ *
+ * O `tailJsonl` não serve aqui: ele pega os últimos 64KB, e um único
+ * `tool_result` de um arquivo Java grande ocupa essa janela sozinho — a lista
+ * encolhia para duas ou três entradas conforme o especialista lia arquivos.
+ * O resultado é memorizado por mtime, porque o painel repete a leitura a cada 2s.
+ */
+const cacheTranscript = new Map<string, { mtime: number; linhas: any[] }>()
+
+async function lerLinhasDoAgente(arquivo: string): Promise<any[]> {
+  let mtime = 0
+  try { mtime = (await fsp.stat(arquivo)).mtimeMs } catch { return [] }
+
+  const cache = cacheTranscript.get(arquivo)
+  if (cache?.mtime === mtime) return cache.linhas
+
+  const linhas: any[] = []
+  const rl = readline.createInterface({
+    input: fs.createReadStream(arquivo, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  })
+  let i = 0
+  for await (const l of rl) {
+    const idx = i++
+    if (!l) continue
+    // Só interessam a primeira linha (o prompt delegado) e as falas do agente.
+    // O teste de substring evita gastar JSON.parse nos tool_result gigantes.
+    if (idx !== 0 && !l.includes('"type":"assistant"')) continue
+    let j: any
+    try { j = JSON.parse(l) } catch { continue }
+    if (idx === 0 || j.type === 'assistant') linhas.push(j)
+  }
+
+  cacheTranscript.set(arquivo, { mtime, linhas })
+  return linhas
+}
+
+
+
 /** Transcript completo de um especialista, para o painel que abre no clique. */
 async function lerTranscript(agentId: string): Promise<EntradaTranscript[]> {
   const root = path.join(CLAUDE_HOME, 'projects')
@@ -327,17 +368,16 @@ async function lerTranscript(agentId: string): Promise<EntradaTranscript[]> {
   }
   if (!alvo) return []
 
-  const linhas = await tailJsonl(alvo)
+  const linhas = await lerLinhasDoAgente(alvo)
   const saida: EntradaTranscript[] = []
 
   // A primeira linha do arquivo é o prompt que o orquestrador delegou.
-  try {
-    const primeira = (await fsp.readFile(alvo, 'utf8')).split('\n')[0]
-    const j = JSON.parse(primeira)
-    const c = j?.message?.content
+  const primeira = linhas[0]
+  if (primeira?.type === 'user') {
+    const c = primeira.message?.content
     const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: any) => x.text ?? '').join('') : ''
-    if (txt) saida.push({ tipo: 'prompt', texto: txt, at: j.timestamp })
-  } catch { /* arquivo em escrita */ }
+    if (txt) saida.push({ tipo: 'prompt', texto: txt, at: primeira.timestamp })
+  }
 
   for (const j of linhas) {
     if (j.type !== 'assistant') continue
@@ -383,14 +423,29 @@ export function claudeWatcher(): Plugin {
         }
       }
 
-      const orq = new Orquestrador((evento: EventoChat) => {
-        broadcast(JSON.stringify({ type: 'CHAT', evento }))
-      })
+      // Um orquestrador por projeto, todos vivos ao mesmo tempo: trocar de
+      // projeto no painel não pode interromper o trabalho já em andamento.
+      const orquestradores = new Map<string, Orquestrador>()
+      const pegar = (chave: string) => {
+        let o = orquestradores.get(chave)
+        if (!o) {
+          o = new Orquestrador(chave, (evento: EventoChat) => {
+            broadcast(JSON.stringify({ type: 'CHAT', evento }))
+          })
+          orquestradores.set(chave, o)
+        }
+        return o
+      }
 
       wss.on('connection', (ws) => {
         if (lastJson) ws.send(lastJson)
-        if (orq.projetoAtual) {
-          ws.send(JSON.stringify({ type: 'CHAT', evento: { kind: 'inicio', projeto: orq.projetoAtual, cwd: '', sessionId: orq.sessao } }))
+        // Reconexão: reanuncia todos os projetos que estão de pé.
+        for (const o of orquestradores.values()) {
+          if (!o.projetoAtual) continue
+          ws.send(JSON.stringify({
+            type: 'CHAT',
+            evento: { kind: 'inicio', chave: o.chave, projeto: o.projetoAtual, cwd: '', sessionId: o.sessao, retomado: true },
+          }))
         }
 
         ws.on('message', async (raw) => {
@@ -400,15 +455,19 @@ export function claudeWatcher(): Plugin {
           try {
             switch (msg.type) {
               case 'CHAT_ENVIAR':
-                if (typeof msg.texto === 'string' && msg.texto.trim()) orq.enviar(msg.texto)
+                if (typeof msg.texto === 'string' && msg.texto.trim()) {
+                  pegar(String(msg.chave)).enviar(msg.texto)
+                }
                 break
               case 'CHAT_PROJETO':
-                await orq.abrirProjeto(String(msg.chave))
+                await pegar(String(msg.chave)).abrirProjeto()
                 break
-              case 'PERMISSAO':
-                if (msg.acao === 'recusar') orq.recusar(String(msg.id))
-                else await orq.aprovar(String(msg.id), msg.acao === 'aprovar_sempre')
+              case 'PERMISSAO': {
+                const o = pegar(String(msg.chave))
+                if (msg.acao === 'recusar') o.recusar(String(msg.id))
+                else await o.aprovar(String(msg.id), msg.acao === 'aprovar_sempre')
                 break
+              }
               case 'TRANSCRIPT': {
                 const entradas = await lerTranscript(String(msg.agentId))
                 ws.send(JSON.stringify({ type: 'TRANSCRIPT', agentId: msg.agentId, entradas }))
@@ -442,7 +501,11 @@ export function claudeWatcher(): Plugin {
 
       tick()
       timer = setInterval(tick, POLL_MS)
-      server.httpServer?.on('close', () => { clearInterval(timer); orq.parar(); wss?.close() })
+      server.httpServer?.on('close', () => {
+        clearInterval(timer)
+        for (const o of orquestradores.values()) o.parar()
+        wss?.close()
+      })
     },
   }
 }

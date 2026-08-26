@@ -7,3 +7,30 @@ dist
 # cuja licença permite usar mas proíbe redistribuir os arquivos.
 # Rode `npm run setup:assets` para instalá-los localmente.
 public/assets/
+
+# ---------------------------------------------------------------------------
+# Nada que descreva a máquina ou os repositórios de quem usa isto entra aqui.
+# Este é um repositório público: o registro de projetos, caminhos, portas e
+# regras de permissão vivem fora dele, em ~/.claude/.
+# ---------------------------------------------------------------------------
+projetos.json
+**/projetos.json
+.claude/
+settings.local.json
+**/settings.local.json
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Capturas de tela costumam mostrar nome de projeto, branch e caminho.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+!public/assets/**
+capturas/
+screenshots/

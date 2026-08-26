@@ -94,6 +94,17 @@ Os quatro papéis padrão vêm dos subagents definidos em `~/.claude/agents/`:
 Qualquer outro subagent que aparecer na sessão (`Explore`, `general-purpose`, …)
 ganha uma mesa extra automaticamente.
 
+## Privacidade
+
+Este repositório não contém nada sobre a máquina de quem o usa. O registro de
+projetos — caminhos, portas, pastas de migration — mora em `~/.claude/projetos.json`,
+**fora do repositório**, e o `.gitignore` bloqueia qualquer cópia dele, além de
+`.env`, chaves, `settings.local.json` e imagens (uma captura de tela mostra nome de
+projeto, branch e caminho sem você perceber).
+
+As regras aprovadas com *Sempre permitir* são gravadas no `.claude/settings.local.json`
+**do projeto onde você está trabalhando**, nunca aqui.
+
 ## Créditos
 
 - Escritório 2D, `RoomBuilder`, `AgentSprite` e `assetKeys` adaptados de

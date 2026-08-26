@@ -38,15 +38,22 @@ function CardPermissao({ bloco }: { bloco: Bloco }) {
 }
 
 export function Chat() {
-  const { blocos, pensando, projetos, projetoAtivo, connected, enviar, escolherProjeto } = useOfficeStore()
+  const {
+    projetos, chaveAtiva, blocosPorProjeto, pensandoPorProjeto,
+    connected, enviar, escolherProjeto,
+  } = useOfficeStore()
   const [texto, setTexto] = useState('')
   const fim = useRef<HTMLDivElement>(null)
+
+  // Cada projeto tem a sua conversa; trocar de aba só troca o que está à vista.
+  const blocos = chaveAtiva ? blocosPorProjeto[chaveAtiva] ?? [] : []
+  const pensando = chaveAtiva ? pensandoPorProjeto[chaveAtiva] ?? false : false
 
   useEffect(() => { fim.current?.scrollIntoView({ behavior: 'smooth' }) }, [blocos.length, pensando])
 
   const submeter = () => {
     const t = texto.trim()
-    if (!t || !connected) return
+    if (!t || !connected || !chaveAtiva) return
     enviar(t)
     setTexto('')
   }
@@ -55,11 +62,19 @@ export function Chat() {
     <section className="chat">
       <div className="chat-topo">
         <select
-          value={projetoAtivo ? projetos.find((p) => p.nome === projetoAtivo)?.chave ?? '' : ''}
+          value={chaveAtiva ?? ''}
           onChange={(e) => e.target.value && escolherProjeto(e.target.value)}
         >
           <option value="">Escolha o projeto…</option>
-          {projetos.map((p) => <option key={p.chave} value={p.chave}>{p.nome}</option>)}
+          {projetos.map((p) => {
+            // Ponto ao lado do nome: esse projeto tem conversa viva em segundo plano.
+            const vivo = (blocosPorProjeto[p.chave]?.length ?? 0) > 0
+            return (
+              <option key={p.chave} value={p.chave}>
+                {vivo ? '● ' : ''}{p.nome}
+              </option>
+            )
+          })}
         </select>
       </div>
 
@@ -96,14 +111,14 @@ export function Chat() {
       <div className="chat-entrada">
         <textarea
           value={texto}
-          placeholder={connected ? 'Manda a demanda…' : 'Sem conexão'}
-          disabled={!connected}
+          placeholder={!connected ? 'Sem conexão' : !chaveAtiva ? 'Escolha um projeto primeiro' : 'Manda a demanda…'}
+          disabled={!connected || !chaveAtiva}
           onChange={(e) => setTexto(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submeter() }
           }}
         />
-        <button onClick={submeter} disabled={!connected || !texto.trim()}>Enviar</button>
+        <button onClick={submeter} disabled={!connected || !chaveAtiva || !texto.trim()}>Enviar</button>
       </div>
     </section>
   )
